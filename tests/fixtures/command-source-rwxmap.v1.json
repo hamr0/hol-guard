@@ -37,7 +37,7 @@
               "default_enabled": true,
               "dependencies": [],
               "deprecated": false,
-              "description": "Identifies `rwxmap ... --force`, which replaces existing `<vendor>.rwxmap.json`, `<vendor>.rwxmap.review.json` and `<vendor>.openapi.rwx.json` files in the output folder (-o, default the current folder). Without --force rwxmap refuses to overwrite and writes nothing. Covers the installed bin and npx, bunx and pnpx launches of the rwxmap package.",
+              "description": "Identifies `rwxmap ... --force`, which replaces existing `<vendor>.rwxmap.json`, `<vendor>.rwxmap.review.json` and `<vendor>.openapi.rwx.json` files in the output folder (-o, default the current folder). Without --force rwxmap refuses to overwrite and writes nothing. Covers the installed bin and npx, bunx and pnpx launches of the rwxmap package. This rule does not gate rwxmap's optional Jev pass, which sends operation text to api.typesafe.ai on any run when RWXMAP_JEV_KEY is set in the environment or a working-directory .env.",
               "example_command": "rwxmap ./openapi.json -o out --force",
               "family": null,
               "fixed_reason": null,
@@ -50,7 +50,8 @@
               "risk_tier": "low",
               "safer_guidance": [
                 "Run rwxmap without --force first; it refuses to overwrite and names the existing files.",
-                "Point -o at a new, empty folder instead of overwriting earlier output."
+                "Point -o at a new, empty folder instead of overwriting earlier output.",
+                "Do not set RWXMAP_JEV_KEY, and check the working directory for a .env that sets it, when processing private API schemas: with the key set, any rwxmap run, with or without --force, sends each operation's method, path, operationId, summary and description to api.typesafe.ai. This extension's --force rule does not gate that optional network disclosure."
               ],
               "typed_capabilities": []
             }
@@ -75,7 +76,7 @@
                 "rwxmap forced output overwrite command"
               ],
               "default_mode": "review",
-              "description": "Identifies `rwxmap ... --force`, which replaces existing `<vendor>.rwxmap.json`, `<vendor>.rwxmap.review.json` and `<vendor>.openapi.rwx.json` files in the output folder (-o, default the current folder). Without --force rwxmap refuses to overwrite and writes nothing. Covers the installed bin and npx, bunx and pnpx launches of the rwxmap package.",
+              "description": "Identifies `rwxmap ... --force`, which replaces existing `<vendor>.rwxmap.json`, `<vendor>.rwxmap.review.json` and `<vendor>.openapi.rwx.json` files in the output folder (-o, default the current folder). Without --force rwxmap refuses to overwrite and writes nothing. Covers the installed bin and npx, bunx and pnpx launches of the rwxmap package. This rule does not gate rwxmap's optional Jev pass, which sends operation text to api.typesafe.ai on any run when RWXMAP_JEV_KEY is set in the environment or a working-directory .env.",
               "family": null,
               "matcher": {
                 "op": "any.v1",
