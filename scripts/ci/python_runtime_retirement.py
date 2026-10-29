@@ -14,6 +14,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
+
 from scripts.ci.python_capability_cleanup_analysis import ImportGraphAnalysis, production_importers
 
 _SOURCE_ROOTS = ("src", "tests", "ci", "scripts")
@@ -254,6 +259,151 @@ def validate_retired_artifacts(contract: Mapping[str, object], artifacts: Sequen
                 _check_retired_body_content(name, data, bodies)
 
 
+def _entry_point_targets(root: Path) -> list[tuple[str, str, str]]:
+    """Every declared console script and entry point, as (name, module, attribute)."""
+    manifest = root / "pyproject.toml"
+    if not manifest.is_file():
+        return []
+    project = tomllib.loads(manifest.read_text(encoding="utf-8")).get("project")
+    if not isinstance(project, Mapping):
+        return []
+    declared: list[tuple[str, object]] = []
+    scripts = project.get("scripts")
+    if isinstance(scripts, Mapping):
+        declared.extend(scripts.items())
+    groups = project.get("entry-points")
+    if isinstance(groups, Mapping):
+        for group, members in groups.items():
+            if isinstance(members, Mapping):
+                declared.extend((f"{group}:{member}", target) for member, target in members.items())
+    targets: list[tuple[str, str, str]] = []
+    for name, target in declared:
+        module, separator, attribute = target.partition(":") if isinstance(target, str) else ("", "", "")
+        if not separator or not module.strip() or not attribute.strip():
+            raise RuntimeError(f"entry point has no module:attribute target: {name}: {target!r}")
+        targets.append((str(name), module.strip(), attribute.strip()))
+    return targets
+
+
+def _table(data: object, *keys: str) -> Mapping[str, object] | None:
+    for key in keys:
+        if not isinstance(data, Mapping):
+            return None
+        data = data.get(key)
+    return data if isinstance(data, Mapping) else None
+
+
+def _wheel_import_roots(root: Path) -> list[tuple[str, str | None]]:
+    """Where an installed import starts, as (directory, packaged top-level name).
+
+    The wheel ships only the packages `pyproject.toml` names, so a module that
+    lives under `tests`, `ci` or `scripts` is absent from the install however
+    plainly the repository holds it.
+    """
+    manifest = root / "pyproject.toml"
+    packages: object = None
+    if manifest.is_file():
+        table = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        wheel = _table(table, "tool", "hatch", "build", "targets", "wheel")
+        packages = wheel.get("packages") if wheel is not None else None
+    roots: list[tuple[str, str | None]] = []
+    for entry in packages if isinstance(packages, list) else []:
+        if not isinstance(entry, str) or not entry:
+            continue
+        parts = PurePosixPath(entry).parts
+        roots.append((PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else "", parts[-1]))
+    return roots or [("src", None)]
+
+
+def _module_source(root: Path, module: str) -> Path | None:
+    parts = module.split(".")
+    for directory, package in _wheel_import_roots(root):
+        if package is not None and parts[0] != package:
+            continue
+        base = root.joinpath(directory, *parts) if directory else root.joinpath(*parts)
+        for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _declared_names(body: Sequence[ast.stmt]) -> dict[str, ast.stmt]:
+    """Every name a block binds at runtime, mapped to the statement that binds it."""
+    declared: dict[str, ast.stmt] = {}
+    for node in body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            declared[node.name] = node
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    declared[alias.asname or alias.name.partition(".")[0]] = node
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    declared[target.id] = node
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            declared[node.target.id] = node
+    return declared
+
+
+def _module_binds_beyond_this_read(body: Sequence[ast.stmt]) -> bool:
+    """Whether a module answers for names no static read of it can list.
+
+    A module exporting through `__getattr__` or a star import still resolves an
+    attribute this gate never sees, so calling that attribute missing would
+    reject an entry point the installed command loads. Only a module body
+    counts: a class's own `__getattr__` serves its instances, not an attribute
+    read off the class itself, so it cannot rescue a stranded target.
+    """
+    for node in body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "__getattr__":
+            return True
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            return True
+    return False
+
+
+def _attribute_resolves(source: str, attribute: str) -> bool:
+    """Whether every component of a dotted entry-point attribute still exists."""
+    body: Sequence[ast.stmt] = ast.parse(source).body
+    module_level = True
+    for component in attribute.split("."):
+        if module_level and _module_binds_beyond_this_read(body):
+            return True
+        node = _declared_names(body).get(component)
+        if node is None:
+            return False
+        if not isinstance(node, ast.ClassDef):
+            # An imported or assigned name holds a value no static read follows,
+            # so whatever hangs below it is out of this gate's reach.
+            return True
+        if node.bases or node.keywords:
+            # A base class or a metaclass supplies attributes from a definition
+            # this read never visits, so the rest of the path is unknowable here.
+            return True
+        body = node.body
+        module_level = False
+    return True
+
+
+def validate_entry_point_targets(root: Path, retired_modules: set[str]) -> None:
+    """Reject an entry point a retirement left pointing at nothing.
+
+    A console script names its module in a string, so no import graph reaches
+    it and no retired-import check sees it. A deletion that takes the module,
+    or only the function the script names, therefore ships a wheel whose
+    command fails at launch instead of reddening a gate here.
+    """
+    for name, module, attribute in _entry_point_targets(root):
+        if module in retired_modules:
+            raise RuntimeError(f"entry point targets a retired module: {name}: {module}")
+        source = _module_source(root, module)
+        if source is None:
+            raise RuntimeError(f"entry point targets a module that does not exist: {name}: {module}")
+        if not _attribute_resolves(source.read_text(encoding="utf-8"), attribute):
+            raise RuntimeError(f"entry point targets a missing attribute: {name}: {module}:{attribute}")
+
+
 def validate_retired_modules(
     root: Path,
     contract: Mapping[str, object],
@@ -263,6 +413,7 @@ def validate_retired_modules(
 ) -> list[dict[str, object]]:
     records = _records(contract)
     validate_retired_bodies(root, contract)
+    validate_entry_point_targets(root, {str(record["module"]) for record in records})
     retired_tests = contract.get("retired_test_paths", [])
     if not isinstance(retired_tests, list):
         raise RuntimeError("retired_test_paths must be a list")

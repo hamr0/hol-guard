@@ -14,6 +14,7 @@ from .input_evidence import input_digest, input_matches, post_input_matches
 from .native_routes import native_route_error
 from .remote_code import REMOTE_CODE_CASES
 from .review_fixtures import (
+    GITHUB_GUARD_NAMED_REPOSITORY_CASE,
     GITHUB_LOOKUP_CASE,
     GITHUB_METADATA_CASE,
     GITHUB_METADATA_CONTROL,
@@ -81,6 +82,8 @@ def required_checks(scenario: Scenario) -> set[str]:
         checks.add("protected:.git/config")
     if scenario.id == GITHUB_REVIEW_CASE:
         checks.add("github-stub-calls-exact")
+    if scenario.id == GITHUB_GUARD_NAMED_REPOSITORY_CASE:
+        checks.add("github-guard-named-repository-call-exact")
     if scenario.id == GITHUB_LOOKUP_CASE:
         checks.add("github-lookup-ran-once")
     if scenario.id == GITHUB_METADATA_CASE:

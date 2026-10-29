@@ -1,6 +1,5 @@
-use std::io::Read;
 #[cfg(test)]
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 #[cfg(test)]
 use std::net::TcpStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -64,18 +63,19 @@ fn authenticate_resident_stream(
         .map_err(|_| "native_resident_auth_timeout_failed".to_owned())?;
     let _ = stream.configure_low_latency();
 
+    // One deadline covers the whole handshake: a client that drips a byte
+    // before each timeout would otherwise renew the timeout for as long as it
+    // likes and hold an authentication worker the entire time.
+    let deadline = Instant::now() + crate::AUTH_TIMEOUT;
     let mut nonce = [0u8; crate::AUTH_NONCE_BYTES];
-    stream
-        .read_exact(&mut nonce)
+    crate::hardening::read_exact_by(&mut *stream, &mut nonce, deadline)
         .map_err(|_| "native_resident_auth_nonce_failed".to_owned())?;
     let server_proof = hmac_sha256(token, crate::SERVER_PROOF_LABEL, &nonce);
-    stream
-        .write_all(&server_proof)
+    crate::hardening::write_all_by(&mut *stream, &server_proof, deadline)
         .map_err(|_| "native_resident_auth_proof_failed".to_owned())?;
 
     let mut client_proof = [0u8; crate::AUTH_PROOF_BYTES];
-    stream
-        .read_exact(&mut client_proof)
+    crate::hardening::read_exact_by(&mut *stream, &mut client_proof, deadline)
         .map_err(|_| "native_resident_auth_client_failed".to_owned())?;
     let expected = hmac_sha256(token, crate::CLIENT_PROOF_LABEL, &nonce);
     if !constant_time_eq(&client_proof, &expected) {
@@ -95,9 +95,10 @@ fn read_request_header_inner(mut stream: BoxedResidentStream) -> Result<PendingR
     stream
         .set_resident_read_timeout(Some(crate::HEADER_TIMEOUT))
         .map_err(|_| "native_frame_timeout_failed".to_owned())?;
+    // The header timeout bounds the whole header, not each read of it.
+    let deadline = Instant::now() + crate::HEADER_TIMEOUT;
     let mut header = [0u8; crate::FRAME_HEADER_BYTES];
-    stream
-        .read_exact(&mut header)
+    crate::hardening::read_exact_by(&mut *stream, &mut header, deadline)
         .map_err(|_| "native_frame_header_failed".to_owned())?;
     if !constant_time_eq(&header[..4], crate::REQUEST_MAGIC) {
         return Err("native_frame_version_mismatch".to_owned());
@@ -149,17 +150,16 @@ fn write_bound_response_inner(
     stream
         .set_resident_write_timeout(Some(crate::RESPONSE_TIMEOUT))
         .map_err(|_| "native_frame_timeout_failed".to_owned())?;
+    let deadline = Instant::now() + crate::RESPONSE_TIMEOUT;
     let digest = Sha256::digest(response);
     let mut header = Vec::with_capacity(crate::FRAME_HEADER_BYTES);
     header.extend_from_slice(crate::RESPONSE_MAGIC);
     header.extend_from_slice(request_id);
     header.extend_from_slice(&digest);
     header.extend_from_slice(&(response.len() as u32).to_be_bytes());
-    stream
-        .write_all(&header)
+    crate::hardening::write_all_by(&mut *stream, &header, deadline)
         .map_err(|error| crate::hardening::write_error(&error, "native_frame_write_failed"))?;
-    stream
-        .write_all(response)
+    crate::hardening::write_all_by(&mut *stream, response, deadline)
         .map_err(|error| crate::hardening::write_error(&error, "native_frame_write_failed"))?;
     stream
         .flush()
@@ -173,6 +173,7 @@ fn write_overload(pending: &mut PendingRequest) {
         Status::Error,
         pending.accepted_at,
     );
+    crate::resident_health_op::record_overload();
     let response = crate::resident_protocol::error_response("native_overloaded", true);
     let _ = write_bound_response(&mut *pending.stream, &pending.request_id, &response);
 }
@@ -275,11 +276,21 @@ fn handle_pending_request(
     let _ = pending
         .stream
         .set_resident_read_timeout(Some(crate::PAYLOAD_TIMEOUT));
+    // A payload may be megabytes, so its read ends at whichever comes first:
+    // the payload timeout or what is left of the request's total budget. The
+    // deadline is checked between reads, so a drip-feeding client cannot keep
+    // an evaluation worker past the budget it was admitted under.
+    let payload_deadline = (Instant::now() + crate::PAYLOAD_TIMEOUT)
+        .min(pending.accepted_at + crate::hardening::TOTAL_REQUEST_BUDGET);
     let mut request = std::mem::take(&mut pending.payload_prefix);
     let prefix_length = request.len();
     request.resize(pending.length, 0);
     let response = if observe(Phase::ResidentPayloadRead, || {
-        pending.stream.read_exact(&mut request[prefix_length..])
+        crate::hardening::read_exact_by(
+            &mut *pending.stream,
+            &mut request[prefix_length..],
+            payload_deadline,
+        )
     })
     .is_err()
     {
@@ -409,10 +420,27 @@ fn dispatch_authenticated(
     }
 }
 
+/// The worker count and queue capacity of each dispatch lane, as
+/// [`start_resident_workers`] sizes them: evaluation first, then control.
+///
+/// A caller reading a queue depth or an overload count needs the lane it was
+/// measured against, and only this module knows how the two lanes divide the
+/// evaluation budget.
+pub(crate) fn lane_shape() -> ((usize, usize), (usize, usize)) {
+    (
+        (
+            crate::evaluation_workers() - control::WORKERS,
+            crate::evaluation_queue_capacity() - control::capacity(),
+        ),
+        (control::WORKERS, control::capacity()),
+    )
+}
+
 pub(crate) fn start_resident_workers(
     token: Arc<[u8; crate::AUTH_TOKEN_BYTES]>,
     policy_store: Option<Arc<crate::policy_store::PolicySnapshotStore>>,
 ) -> ResidentAdmission {
+    crate::resident_health_op::mark_serving();
     let (control_sender, mut workers) = control::start(policy_store.clone());
     let (evaluation_sender, evaluation_receiver) =
         sync_channel::<PendingRequest>(crate::evaluation_queue_capacity() - control::capacity());
@@ -508,3 +536,7 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "resident_transport_continuation_tests.rs"]
 mod continuation_tests;
+
+#[cfg(test)]
+#[path = "resident_transport_hardening_tests.rs"]
+mod hardening_tests;

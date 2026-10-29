@@ -493,3 +493,7 @@ mod subdirectory;
 #[cfg(unix)]
 #[path = "hook_direct_saved_seeded_tests.rs"]
 mod seeded;
+
+#[cfg(unix)]
+#[path = "hook_direct_saved_custom_grant_tests.rs"]
+mod custom_grant_tests;

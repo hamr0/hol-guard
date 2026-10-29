@@ -769,6 +769,7 @@ def test_a_harness_with_no_prompt_hook_skips_the_prompt_cases_rather_than_failin
     assert [entry["id"] for entry in replay["skipped"]] == [
         "benign-prompt-submit",
         "benign-prompt-submit-names-a-file",
+        "benign-prompt-submit-wire-encoding",
     ]
     assert all("prompt" not in failure for failure in evidence["failures"])
 

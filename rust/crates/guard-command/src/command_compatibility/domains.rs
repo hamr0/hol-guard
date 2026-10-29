@@ -441,17 +441,20 @@ pub(super) fn observe(
         let output_write = write_command || redirect == Redirect::Output || interpreter_write;
         // A write to a project file whose name only reads like a credential,
         // such as `src/tokenizer.ts`, is the edit the agent was asked to make.
-        if (output_write
-            && sensitive(&segment.text)
-            && !source_names::only_source_file_names(&segment.text, &segment.tokens, &executable))
-            || (redirect == Redirect::Stderr
-                && segment.tokens.iter().any(|token| {
-                    if token.contains(char::is_whitespace) {
-                        sensitive_path(token)
-                    } else {
-                        sensitive(token)
-                    }
-                }))
+        // The same holds beside a stderr redirect: `vitest run
+        // src/token.test.ts 2>&1` reads the test file the agent was asked to
+        // run, so the redirect alone must not turn the project file it names
+        // into a credential read.
+        let stderr_names_credential = redirect == Redirect::Stderr
+            && segment.tokens.iter().any(|token| {
+                if token.contains(char::is_whitespace) {
+                    sensitive_path(token)
+                } else {
+                    sensitive(token)
+                }
+            });
+        if ((output_write && sensitive(&segment.text)) || stderr_names_credential)
+            && !source_names::only_source_file_names(&segment.text, &segment.tokens, &executable)
         {
             output.rule("command.shell-mutations.sensitive-file-write", index, true);
         }

@@ -78,7 +78,7 @@ fn settle(client: &Client, request: &Request, body: &str) -> Settled {
 
 /// The deadline for one daemon request inside the bridge's share of the
 /// hook deadline, or `None` when no time is left for one.
-fn request_deadline(client: &Client, request: &Request) -> Option<Instant> {
+pub(super) fn request_deadline(client: &Client, request: &Request) -> Option<Instant> {
     let budget = match request.kind {
         Kind::Prompt => PROMPT_DAEMON_BUDGET,
         Kind::PreToolUse | Kind::After => DAEMON_BUDGET,
@@ -90,7 +90,7 @@ fn request_deadline(client: &Client, request: &Request) -> Option<Instant> {
 /// stripped as the client strips it. The client also sends `hook_env`,
 /// which the daemon drops unread. `miss` names why the resident did not
 /// answer, so the daemon can count it.
-fn post(
+pub(super) fn post(
     target: &DaemonTarget,
     request: &Request,
     deadline: Instant,

@@ -10,6 +10,8 @@ from typing import Any
 from .realism_fixtures import write_windows_launcher
 
 GITHUB_REVIEW_CASE = "github-review-work-enabled-permissions"
+# A repository named after Guard reaches `gh api` as `repos/{owner}/hol-guard/...`.
+GITHUB_GUARD_NAMED_REPOSITORY_CASE = "github-api-guard-named-repository-enabled-permissions"
 GITHUB_DELETE_CASE = "explicit-disabled-github-delete-permission"
 # The Oh My Pi `github` tool runs `gh api` underneath, so its lookups reach the same stand-in.
 GITHUB_LOOKUP_CASE = "omp-native-github-search-prs"
@@ -18,8 +20,17 @@ GITHUB_LOOKUP_QUERY = "is:pr metrics OR analytics"
 GITHUB_METADATA_CASE = "github-metadata-command-reads"
 GITHUB_METADATA_CONTROL = "github-metadata-mutation-control"
 GITHUB_STUB_CASES = frozenset(
-    {GITHUB_REVIEW_CASE, GITHUB_DELETE_CASE, GITHUB_LOOKUP_CASE, GITHUB_METADATA_CASE, GITHUB_METADATA_CONTROL}
+    {
+        GITHUB_REVIEW_CASE,
+        GITHUB_GUARD_NAMED_REPOSITORY_CASE,
+        GITHUB_DELETE_CASE,
+        GITHUB_LOOKUP_CASE,
+        GITHUB_METADATA_CASE,
+        GITHUB_METADATA_CONTROL,
+    }
 )
+# Cases that run with the GitHub extension and every one of its permissions enabled.
+GITHUB_ENABLED_CASES = frozenset({GITHUB_REVIEW_CASE, GITHUB_GUARD_NAMED_REPOSITORY_CASE})
 METADATA_CALLS = (
     ("cache", "list", "--limit", "5"),
     ("label", "list", "--json", "name"),
@@ -80,6 +91,16 @@ EXPECTED_GH_CALLS = (
     ("api", "graphql", "-f", f"query={_RESOLVE_COMPOUND}"),
 )
 DELETE_COMMAND = "gh repo delete example-org/example-repo --yes"
+_GUARD_NAMED_RUN = "repos/example-org/hol-guard/actions/runs/123/approve"
+_GUARD_NAMED_NEXT_RUN = "repos/example-org/hol-guard/actions/runs/124/approve"
+GUARD_NAMED_REPOSITORY_COMMANDS = (
+    f"gh api --method POST {_GUARD_NAMED_RUN}",
+    f"gh --hostname github.com api --method POST {_GUARD_NAMED_NEXT_RUN}",
+)
+GUARD_NAMED_REPOSITORY_CALLS = (
+    ("api", "--method", "POST", _GUARD_NAMED_RUN),
+    ("--hostname", "github.com", "api", "--method", "POST", _GUARD_NAMED_NEXT_RUN),
+)
 
 
 def gh_stub_script(log: Path) -> str:
@@ -154,6 +175,9 @@ def github_checks(workspace: Path, scenario_id: str) -> dict[str, bool]:
         return {"github-metadata-control-not-executed": recorded_gh_calls(workspace) is None}
     if scenario_id == GITHUB_REVIEW_CASE:
         return {"github-stub-calls-exact": recorded_gh_calls(workspace) == list(EXPECTED_GH_CALLS)}
+    if scenario_id == GITHUB_GUARD_NAMED_REPOSITORY_CASE:
+        calls = recorded_gh_calls(workspace)
+        return {"github-guard-named-repository-call-exact": calls == list(GUARD_NAMED_REPOSITORY_CALLS)}
     if scenario_id == GITHUB_LOOKUP_CASE:
         calls = recorded_gh_calls(workspace)
         return {"github-lookup-ran-once": calls is not None and len(calls) == 1 and _is_lookup_call(calls[0])}

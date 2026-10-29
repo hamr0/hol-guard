@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from codex_plugin_scanner.guard import native_hook_adapter
-from codex_plugin_scanner.guard.daemon.hook_native_review_approval import _native_review_action_envelope
 
 
 @pytest.fixture(autouse=True)
@@ -16,14 +15,24 @@ def _bound_native_runtime(native_approval_reuse_runtime: Path) -> Path:
     return native_approval_reuse_runtime
 
 
-def _envelope(harness: str, payload: dict[str, object]) -> dict[str, object]:
-    envelope = _native_review_action_envelope(
-        harness=harness,
-        payload=payload,
-        workspace=None,
-        home_dir=None,
-    )
-    assert envelope is not None
+def _envelope(
+    harness: str, payload: dict[str, object], native_result: dict[str, object] | None = None
+) -> dict[str, object]:
+    review = {
+        "result": {"decision": "review", **(native_result or {})},
+        "native_receipt": None,
+        "request_id": "request-1",
+        "approval_center_url": "http://127.0.0.1:4781/approvals",
+        "guard_home": "/guard-home",
+        "review_binding": None,
+        "exact_token": None,
+        "once_only_reason": None,
+        "queue_group_id": None,
+        "bound_bash": None,
+    }
+    request = native_hook_adapter.native_review_request(harness, payload, review, workspace=None, home_dir=None)
+    envelope = request["action_envelope_json"]
+    assert isinstance(envelope, dict)
     return envelope
 
 
@@ -73,12 +82,10 @@ def test_native_review_preserves_configuration_classification() -> None:
 
 
 def test_native_review_sets_command_category_from_command_extension_observations() -> None:
-    envelope = _native_review_action_envelope(
-        harness="omp",
-        payload={"tool_name": "Bash", "tool_input": {"command": "docker version --format '{{.Server.Version}}'"}},
-        workspace=None,
-        home_dir=None,
-        native_result={
+    envelope = _envelope(
+        "omp",
+        {"tool_name": "Bash", "tool_input": {"command": "docker version --format '{{.Server.Version}}'"}},
+        {
             "command_extensions": {
                 "observations": [
                     {
@@ -90,7 +97,6 @@ def test_native_review_sets_command_category_from_command_extension_observations
             }
         },
     )
-    assert envelope is not None
     assert envelope["command_category"] == "command.container-runtime"
 
 

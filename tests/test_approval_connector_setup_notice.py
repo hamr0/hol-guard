@@ -100,6 +100,9 @@ class _QueueStore(_Store):
     def get_approval_request(self, request_id: str) -> dict[str, object]:
         return self.rows[request_id]
 
+    def queue_review_approval_request(self, request: object, now: str, **_options: object) -> dict[str, object]:
+        return self.get_approval_request(self.add_approval_request(request, now))  # type: ignore[arg-type]
+
     def approval_desktop_notified_at(self, request_id: str) -> str | None:
         group = self.rows[request_id]["queue_group_id"]
         for other, row in self.rows.items():
@@ -108,16 +111,43 @@ class _QueueStore(_Store):
         return self.notified.get(request_id)
 
 
+def _native_request(harness: str, payload: dict[str, object], review: dict[str, object], **_k: object) -> dict:
+    """The resident's ``review_request`` answer, reduced to what these tests read."""
+
+    request_id = review["request_id"]
+    tool_input = payload["tool_input"]
+    assert isinstance(tool_input, dict)
+    return {
+        "request_id": request_id,
+        "harness": harness,
+        "artifact_id": f"{harness}:native-pretool:Bash",
+        "artifact_name": "Bash",
+        "artifact_hash": review["review_binding"] or request_id,
+        "policy_action": "review",
+        "recommended_scope": "artifact",
+        "changed_fields": ["native_pre_tool"],
+        "source_scope": "harness",
+        "config_path": review["guard_home"],
+        "review_command": f"hol-guard approvals approve {request_id}",
+        "approval_url": f"{review['approval_center_url']}/requests/{request_id}",
+        "workspace": None,
+        "artifact_type": "tool_call",
+        "launch_target": tool_input["command"],
+        "risk_summary": "Needs review.",
+        "action_envelope_json": {},
+        "raw_command_text": tool_input["command"],
+        "queue_group_id": review["queue_group_id"],
+    }
+
+
 def _queue(
     monkeypatch: pytest.MonkeyPatch, store: _QueueStore, request_id: str, connector: SetupConnector | None
 ) -> None:
     monkeypatch.setattr(review.uuid, "uuid4", lambda: SimpleNamespace(hex=request_id))
     for name, value in {
         "native_review_policy_binding": lambda **_k: None,
-        "native_review_binding": lambda *_a, **_k: "binding",
-        "native_exact_action": lambda **_k: (None, None),
         "native_review_hint": lambda *_a, **_k: None,
-        "_native_review_action_envelope": lambda **_k: {},
+        "native_review_request": _native_request,
     }.items():
         monkeypatch.setattr(review, name, value)
     queued = review.queue_native_pre_tool_review(
@@ -128,6 +158,8 @@ def _queue(
         native_receipt=None,
         workspace=None,
         guard_home=Path("/nonexistent-guard-home"),
+        exact_token=None,
+        review_binding="binding",
         approval_center_url="http://127.0.0.1:4781",
         connector=connector,
     )

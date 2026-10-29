@@ -113,6 +113,16 @@
       }
     },
     {
+      "id": "benign-prompt-submit-wire-encoding",
+      "event": "UserPromptSubmit",
+      "expect": "allow",
+      "payload": {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Make the email parser keep Unicode, newlines, transfer-encoding and multipart parts intact.",
+        "cwd": "{workspace}"
+      }
+    },
+    {
       "id": "attack-private-key-exfiltration",
       "expect": "not-allow",
       "payload": {

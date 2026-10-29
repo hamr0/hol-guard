@@ -9,6 +9,7 @@ use super::PathContext;
 use crate::native_command_controls::CompiledNativeCommandControls;
 use crate::CanonicalCommandV1;
 use guard_contracts::{GuardExecutionEnvironmentV1, PreToolActionTypeV1, PreToolResultV1};
+use serde_json::Value;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -399,13 +400,30 @@ fn extensions_contain(
 
 /// Whether this host runs the workspace sandbox for this harness hook: macOS
 /// Seatbelt, or a Linux bubblewrap that passed the overlay probe.
-pub(super) fn host_eligible(harness: &str, event: &str) -> bool {
+pub(super) fn host_eligible(harness: &str, event: &str, payload: &Value) -> bool {
     event == "PreToolUse"
-        && matches!(
+        && (matches!(
             harness,
             "omp" | "oh-my-pi" | "pi" | "zcode" | "claude-code" | "codex"
-        )
+        ) || cursor_shell_route(harness, payload))
         && sandbox_available()
+}
+
+/// Whether a Cursor call can be rewritten into the contained sink. Cursor
+/// rewrites a shell call only from its `preToolUse` hook for `Shell`, which
+/// carries no `cursor_source_hook_event` and which Guard's hook names with
+/// `cursor_route_probe`; the sink then re-authorizes the call
+/// it saved with the receipt-only flag. `beforeShellExecution` cannot rewrite,
+/// so there the same command keeps its review.
+pub(crate) fn cursor_shell_route(harness: &str, payload: &Value) -> bool {
+    let probe = payload.get("tool_name").and_then(Value::as_str) == Some("Shell")
+        && payload.get("cursor_source_hook_event").is_none()
+        && payload.get("cursor_route_probe").and_then(Value::as_bool) == Some(true);
+    let receipt = payload
+        .get("guard_containment_receipt_only")
+        .and_then(Value::as_bool)
+        == Some(true);
+    harness == "cursor" && (probe || receipt)
 }
 
 pub(super) fn sandbox_available() -> bool {
@@ -435,9 +453,10 @@ pub(super) fn convert(
     execution_environment: Option<&GuardExecutionEnvironmentV1>,
     harness: &str,
     event: &str,
+    payload: &Value,
     command_text: Option<&str>,
 ) {
-    if !host_eligible(harness, event)
+    if !host_eligible(harness, event, payload)
         || !matches!(
             result.action.action_type,
             PreToolActionTypeV1::Command | PreToolActionTypeV1::Package
@@ -518,8 +537,8 @@ pub(super) fn convert(
     // workspace, so a manager running a local verb answers for the
     // observation too. A command with no manager in it proves nothing about
     // the permission, so it keeps the admission it has.
-    let local_work = package::local_package_work(model, runners.is_some(), &workspace);
-    let manager_work = local_work && package::names_a_manager(model);
+    let local_work = package::local_package_work(shaped, runners.is_some(), &workspace);
+    let manager_work = local_work && package::names_a_manager(shaped);
     if !extensions_contain(result, controls, issued, package || manager_work)
         || (package && !local_work)
     {

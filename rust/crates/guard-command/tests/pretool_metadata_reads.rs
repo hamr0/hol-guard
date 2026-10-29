@@ -115,6 +115,11 @@ fn size_and_comparison_reads_proceed() {
         "diff -u src/one.ts old/one.ts",
         "diff -ru src old",
         "diff --brief src old",
+        "cmp src/one.ts old/one.ts",
+        "cmp -s README.md src/one.ts",
+        "cmp -l -n 64 src/one.ts old/one.ts",
+        "cmp --bytes=64 src/one.ts old/one.ts 0 0",
+        "cmp -i 3:3 src/one.ts old/one.ts",
     ] {
         assert_eq!(shell(&home, command), "allow", "{command}");
     }
@@ -138,6 +143,15 @@ fn unproven_size_and_comparison_reads_still_ask() {
         "diff - README.md",
         "diff --from-file=README.md src/one.ts old/one.ts",
         "diff README.md",
+        "cmp src/.env README.md",
+        "cmp - README.md",
+        "cmp README.md",
+        "cmp src old",
+        "cmp README.md ~/.ssh/id_ed25519",
+        "cmp README.md src/one.ts $N",
+        "cmp -n $N README.md src/one.ts",
+        "cmp --ignore-initial=1K README.md src/one.ts",
+        "cmp -x README.md src/one.ts",
     ] {
         assert!(!shell(&home, command).contains("allow"), "{command}");
     }

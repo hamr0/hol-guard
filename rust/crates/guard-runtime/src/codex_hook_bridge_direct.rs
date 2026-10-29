@@ -22,9 +22,9 @@ use serde_json::{json, Value};
 
 use crate::claude_hook_bridge_http::remaining;
 use crate::claude_hook_bridge_render::py_strip;
-use crate::codex_hook_bridge_direct_resident::{
-    send_to_live_resident, send_to_live_resident_reporting, DirectMiss,
-};
+#[cfg(unix)]
+use crate::codex_hook_bridge_direct_resident::send_to_live_resident;
+use crate::codex_hook_bridge_direct_resident::{send_to_live_resident_reporting, DirectMiss};
 use crate::codex_hook_response::{POST_TOOL_USE, PRE_TOOL_USE};
 
 const STATE_DIRECTORY: &str = "native-runtime";
@@ -306,6 +306,7 @@ fn request_body(
 
 /// The harness response of an `answer`, or `None` for a defer or anything
 /// that is not a well-formed `hook_direct` result.
+#[cfg(unix)]
 pub(crate) fn answered_response(output: &[u8]) -> Option<String> {
     answered_response_reporting(output).ok()
 }

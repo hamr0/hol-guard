@@ -151,7 +151,7 @@ fn stand_ins(home: &std::path::Path, dir: &str, names: &[&str]) -> std::path::Pa
     bin
 }
 
-fn evaluate_on_path(
+pub fn evaluate_on_path(
     (harness, event): (&str, &str),
     payload: &serde_json::Value,
     (controls, deadline): (

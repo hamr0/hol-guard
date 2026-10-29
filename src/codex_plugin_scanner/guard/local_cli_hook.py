@@ -72,48 +72,6 @@ class _Reply:
     contained_route: Mapping[str, str] | None = None
 
 
-def observe_unlisted_cli(
-    *, store: GuardStore, command: str, cwd: Path, home_dir: Path | None, path: str | None = None
-) -> None:
-    """Record the CLIs a command launches without consulting any grant."""
-
-    native_local_cli_hook(
-        store, command=command, cwd=cwd, home_dir=home_dir, current_action="allow", grant_allowed=False, path=path
-    )
-
-
-def native_local_cli_hook(
-    store: GuardStore,
-    *,
-    command: str,
-    cwd: Path,
-    home_dir: Path | None,
-    current_action: GuardAction,
-    grant_allowed: bool,
-    reason_code: str | None = None,
-    path: str | None = None,
-) -> GuardAction | None:
-    """Return the resident's action, or ``None`` without a bound answer; a store failure raises.
-
-    A grant that only widens the sandbox keeps the action here: callers that
-    run the command contained ask ``local_cli_contained_grant`` instead.
-    """
-
-    reply = _native_local_cli_hook_reply(
-        store,
-        command=command,
-        cwd=cwd,
-        home_dir=home_dir,
-        current_action=current_action,
-        grant_allowed=grant_allowed,
-        reason_code=reason_code,
-        path=path,
-    )
-    if reply is None:
-        return None
-    return current_action if reply.action == ALLOW_CONTAINED_WITH_GRANT else cast(GuardAction, reply.action)
-
-
 def local_cli_contained_grant(
     store: GuardStore,
     *,

@@ -311,6 +311,14 @@ assert(
   resolveDetectedAppStatus({ active: true }, watchModeCodexHealth, true, true, true) === "partial",
   "active Codex with passing hooks is not a repair loop when global protection is Watch",
 );
+assert(
+  resolveDetectedAppStatus({ active: true }, watchModeCodexHealth, true, true, true, "needs_repair") === "needs_repair",
+  "an active install whose latest setup check failed needs repair, matching Guard Cloud",
+);
+assert(
+  resolveDetectedAppStatus(undefined, noProtectionHealth, false, false, true, "protected") === "protected",
+  "an app with Guard hooks but no install record is protected, matching Guard Cloud",
+);
 const missingHookProofHealth = { ...watchModeCodexHealth, checks: [] };
 assert(
   resolveDetectedAppStatus({ active: true }, missingHookProofHealth, true, true, true) === "needs_repair",

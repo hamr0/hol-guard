@@ -164,7 +164,7 @@ pub(crate) fn event_name(text: &str, payload: &PyVal) -> String {
     "PreToolUse".to_owned()
 }
 
-fn is_guard_action(value: &str) -> bool {
+pub(crate) fn is_guard_action(value: &str) -> bool {
     GuardAction::from_canonical(value).is_some()
 }
 
@@ -356,12 +356,12 @@ fn should_exit_block(harness: &str, event_name: &str, policy_action: &str) -> bo
 }
 
 /// A recognized decision: `value.strip().lower()` within the four words.
-fn decision_word(value: Option<&PyVal>) -> Option<String> {
+pub(crate) fn decision_word(value: Option<&PyVal>) -> Option<String> {
     let lowered = py_strip(value?.as_str()?).to_lowercase();
     DECISIONS.contains(&lowered.as_str()).then_some(lowered)
 }
 
-fn has_key(entries: &[(String, PyVal)], key: &str) -> bool {
+pub(crate) fn has_key(entries: &[(String, PyVal)], key: &str) -> bool {
     entries.iter().any(|(name, _)| name == key)
 }
 

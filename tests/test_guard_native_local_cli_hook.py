@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from codex_plugin_scanner.guard import local_cli_hook as client
+from tests import runtime_wrapper_support
 
 
 def _reply(
@@ -51,7 +52,7 @@ def _ask(
         _repair_store_permissions=lambda: None,
         _recover_fatal_sqlite_store=(recovered if recovered is not None else []).append,
     )
-    return client.native_local_cli_hook(
+    return runtime_wrapper_support.native_local_cli_hook(
         store,
         command="pnpm run build",
         cwd=tmp_path,

@@ -342,7 +342,7 @@ const PATTERN_TOOLS: &[&str] = &[
 /// A `$` the shell expands. Inside single quotes it is literal, and a pattern
 /// tool reads it as program text (`awk '/x$/{f=1}'`). Any other tool may hand
 /// its arguments to a shell or expand them itself, so every `$` counts there.
-fn expands_variable(text: &str, name: &str) -> bool {
+pub(super) fn expands_variable(text: &str, name: &str) -> bool {
     if !PATTERN_TOOLS.contains(&name) {
         return text.contains('$');
     }
@@ -422,7 +422,10 @@ fn outside_from(value: &str, name: &str, workspace: &Path, below: usize) -> bool
         let top = path.components().nth(1);
         let names_file_system =
             top.is_some_and(|top| Path::new("/").join(top.as_os_str()).exists());
-        return names_file_system && !path.starts_with(workspace) && !DEVICES.contains(&value);
+        return names_file_system
+            && !path.starts_with(workspace)
+            && !through_root_link(path, workspace)
+            && !DEVICES.contains(&value);
     }
     let mut depth = below;
     path.components().any(|component| match component {
@@ -439,6 +442,20 @@ fn outside_from(value: &str, name: &str, workspace: &Path, below: usize) -> bool
         }
         _ => false,
     })
+}
+
+/// On macOS `/tmp` and `/var` are fixed root links into `/private`, so
+/// `$TMPDIR` spells a worktree there as `/var/folders/…` while its canonical
+/// workspace is `/private/var/folders/…`.
+pub(super) fn through_root_link(path: &Path, workspace: &Path) -> bool {
+    cfg!(target_os = "macos")
+        && (path.starts_with("/var") || path.starts_with("/tmp"))
+        && !path
+            .components()
+            .any(|component| component == Component::ParentDir)
+        && Path::new("/private")
+            .join(path.strip_prefix("/").unwrap_or(path))
+            .starts_with(workspace)
 }
 
 #[cfg(test)]

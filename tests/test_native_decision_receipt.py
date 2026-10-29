@@ -7,13 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from codex_plugin_scanner.guard.daemon.hook_native_review_approval import _native_review_action_envelope
+from ci.native_runtime.post_tool_review import response_from_payload
 from codex_plugin_scanner.guard.native_decision_receipt import (
-    canonical_receipt_bytes,
     receipt_matches_edge,
     validate_native_decision_receipt,
 )
-from codex_plugin_scanner.guard.native_response_decoder import response_from_payload
+from codex_plugin_scanner.guard.native_hook_adapter import native_review_request
 from codex_plugin_scanner.guard.runtime.actions import (
     GuardActionEnvelope,
     normalize_harness_payload,
@@ -21,6 +20,7 @@ from codex_plugin_scanner.guard.runtime.actions import (
 )
 from codex_plugin_scanner.guard.store import GuardStore
 from codex_plugin_scanner.guard.store_native_decision_receipts import native_decision_receipt_schema_statement
+from tests.native_pretool_edge_fixtures import canonical_receipt_bytes
 
 
 def _receipt(**overrides: object) -> dict[str, object]:
@@ -156,6 +156,25 @@ def test_review_anchor_is_optional_and_not_decision_identity() -> None:
         assert validate_native_decision_receipt(malformed) is None
 
 
+def _review_envelope(payload: dict[str, object], receipt: dict[str, object], workspace: Path) -> dict[str, object]:
+    review = {
+        "result": {"decision": "review", "reason": "Review this command."},
+        "native_receipt": receipt,
+        "request_id": "request-1",
+        "approval_center_url": "http://127.0.0.1:4781/approvals",
+        "guard_home": str(workspace),
+        "review_binding": None,
+        "exact_token": None,
+        "once_only_reason": None,
+        "queue_group_id": None,
+        "bound_bash": None,
+    }
+    request = native_review_request("cursor", payload, review, workspace=workspace, home_dir=workspace)
+    envelope = request["action_envelope_json"]
+    assert isinstance(envelope, dict)
+    return envelope
+
+
 def test_sealed_receipt_is_detached_without_raw_input_leakage(tmp_path: Path) -> None:
     receipt = _receipt(origin_authentication="f" * 64)
     tool_input = {"command": "cat .env", "token": "private-token-value"}
@@ -163,14 +182,7 @@ def test_sealed_receipt_is_detached_without_raw_input_leakage(tmp_path: Path) ->
         "tool_name": "Shell",
         "tool_input": tool_input,
     }
-    envelope = _native_review_action_envelope(
-        harness="cursor",
-        payload=payload,
-        workspace=tmp_path,
-        home_dir=tmp_path,
-        native_receipt=receipt,
-    )
-    assert envelope is not None
+    envelope = _review_envelope(payload, receipt, tmp_path)
     detached = envelope.get("native_origin_receipt")
     assert isinstance(detached, dict)
     assert detached == receipt
@@ -189,25 +201,11 @@ def test_sealed_receipt_is_detached_without_raw_input_leakage(tmp_path: Path) ->
     assert stored.action_id == fresh["action_id"]
     assert stable_action_hash(stored) == stable_action_hash(GuardActionEnvelope.from_dict(fresh))
 
-    legacy = _native_review_action_envelope(
-        harness="cursor",
-        payload={"tool_name": "Shell", "tool_input": {"command": "cat .env"}},
-        workspace=tmp_path,
-        home_dir=tmp_path,
-        native_receipt=_receipt(),
-    )
-    assert legacy is not None
+    shell = {"tool_name": "Shell", "tool_input": {"command": "cat .env"}}
+    legacy = _review_envelope(shell, _receipt(), tmp_path)
     assert "native_origin_receipt" not in legacy
 
-    malformed = _receipt(origin_authentication="b" * 63)
-    malformed_envelope = _native_review_action_envelope(
-        harness="cursor",
-        payload={"tool_name": "Shell", "tool_input": {"command": "cat .env"}},
-        workspace=tmp_path,
-        home_dir=tmp_path,
-        native_receipt=malformed,
-    )
-    assert malformed_envelope is not None
+    malformed_envelope = _review_envelope(shell, _receipt(origin_authentication="b" * 63), tmp_path)
     assert "native_origin_receipt" not in malformed_envelope
 
 
@@ -356,7 +354,8 @@ def test_store_initializes_receipt_schema_marker_and_recorded_at_index(tmp_path:
     assert "idx_native_hook_decision_receipts_recorded_at" in indexes
 
 
-def test_post_tool_edge_decoder_requires_receipt_bound_to_result() -> None:
+def test_post_tool_edge_decoder_requires_a_receipt() -> None:
+    # Whether the receipt records this result is the edge's own check now.
     result = {
         "decision": "allow",
         "model_output_action": "allow_original",
@@ -381,7 +380,3 @@ def test_post_tool_edge_decoder_requires_receipt_bound_to_result() -> None:
     missing_receipt = dict(edge)
     del missing_receipt["receipt"]
     assert response_from_payload(missing_receipt) is None
-
-    mutated_result = dict(edge)
-    mutated_result["result"] = {**result, "decision": "deny"}
-    assert response_from_payload(mutated_result) is None

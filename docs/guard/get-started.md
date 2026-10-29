@@ -320,6 +320,19 @@ Optional project override:
 default_action = "block"
 ```
 
+Guard also assesses the workspaces you admit, and the ones a harness install registers, in a background
+worker that the daemon runs. To turn that worker off for the whole device, set this in the home config
+(the default is `true`):
+
+```toml
+workspace_assessment_enabled = false
+```
+
+Turning it off stops the worker from checking or queueing anything, and turning it on again resumes it; a
+running daemon notices either change within about half a minute, without a restart. It never deletes stored runs, findings, fix proposals or admissions, so turning it back on resumes where it left off. Removing
+a harness install ends the automatic admission of its workspace the same way: the worktree stops being
+checked, and its run history and fix proposals stay.
+
 Guard still reads the legacy `.ai-plugin-scanner-guard.toml` file if you already have one, but new local overrides should use `.hol-guard.toml`.
 
 Guard resolves decisions in this order:

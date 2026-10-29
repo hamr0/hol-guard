@@ -9,6 +9,7 @@
 //! permission repair, fatal-store recovery, wall-clock timestamps) stay with
 //! the caller, which passes every timestamp in the request.
 
+use std::path::Path;
 use std::time::Duration;
 
 use guard_contracts::{
@@ -27,6 +28,7 @@ use crate::guard_store_approval_page_reads as approval_pages;
 use crate::guard_store_approval_queue::queue_blocked_approvals;
 use crate::guard_store_approval_queue_result as queue_result;
 use crate::guard_store_approval_reads as approval_reads;
+use crate::guard_store_approval_reads::with_stored_row as stored_row;
 use crate::guard_store_approval_resolve::{
     resolve_approval_request, resolve_harness_native_approval_request,
     resolve_matching_duplicate_requests,
@@ -71,6 +73,7 @@ use crate::guard_store_outbox_recover::recover_sequences;
 use crate::guard_store_outbox_requeue::{repair_rejected_correlation, requeue_method};
 use crate::guard_store_policy_source_context::policy_source_contexts;
 use crate::guard_store_policy_upsert::upsert_policy;
+use crate::guard_store_queue_live_wait::queue_with_live_wait;
 use crate::guard_store_receipt_reads as receipt_reads;
 use crate::guard_store_receipt_rollups as receipt_rollups;
 use crate::guard_store_receipt_writes as receipt_writes;
@@ -143,9 +146,28 @@ pub(crate) fn evaluate(request: &GuardStoreRequestV1) -> StoreResult<(Value, Opt
     evaluate_with_owner(request, None)
 }
 
+/// Run one call and say whether its write committed, even when it fails.
+///
+/// The outbox generation is read after the commit, so a call can fail with its
+/// write already durable; a caller that retries failed writes elsewhere must
+/// not retry that one.
+pub(crate) fn evaluate_committing(request: &GuardStoreRequestV1) -> (StoreResult<Value>, bool) {
+    let mut committed = false;
+    let outcome = evaluate_tracked(request, None, &mut committed);
+    (outcome.map(|(payload, _)| payload), committed)
+}
+
 fn evaluate_with_owner(
     request: &GuardStoreRequestV1,
     owner: Option<&crate::policy_store::PolicySnapshotStore>,
+) -> StoreResult<(Value, Option<i64>)> {
+    evaluate_tracked(request, owner, &mut false)
+}
+
+fn evaluate_tracked(
+    request: &GuardStoreRequestV1,
+    owner: Option<&crate::policy_store::PolicySnapshotStore>,
+    committed_write: &mut bool,
 ) -> StoreResult<(Value, Option<i64>)> {
     let invalid = |code| Err(StoreError::Invalid(code));
     if request.schema != GUARD_STORE_REQUEST_SCHEMA {
@@ -164,6 +186,13 @@ fn evaluate_with_owner(
         Some(kind) => kind,
         None => return invalid("native_guard_store_method_unknown"),
     };
+    // A waiting Codex hook's live wait is built before the store opens its
+    // write: proving the bridge process live can spawn `ps`.
+    let prepared = crate::codex_live_wait_build::prepare(
+        &request.method,
+        &request.args,
+        Path::new(&request.guard_home),
+    );
     // A warm call reuses a kept connection: reopening parsed the whole schema
     // on every call (see `guard_store_write_cache`).
     let connection = crate::guard_store_write_cache::open_read_write_cached(&path)?;
@@ -171,8 +200,12 @@ fn evaluate_with_owner(
     apply_pragmas(&connection)?;
     // A total read only writes for the one-time rebuild a migration requests;
     // every other call stays lock-free.
-    let args = Args(&request.args);
-    let kind = if (request.method == "count_receipts"
+    let args = Args(prepared.as_ref().unwrap_or(&request.args));
+    // A retry's block check alone writes nothing: it keeps the lock-free read
+    // the separate block lookup had.
+    let kind = if request.method == "settle_native_review_reuse" && !args.flag("spend")? {
+        Kind::Read
+    } else if (request.method == "count_receipts"
         && kind == Kind::Read
         && receipt_rollups::rebuild_pending(&connection)?)
         || (connect::is_state_read(&request.method)
@@ -213,6 +246,7 @@ fn evaluate_with_owner(
         let committed = finalize_and_commit(&connection, writes);
         guard_store_approval_backfill::settle(committed.is_ok());
         committed?;
+        *committed_write = writes;
     }
     let generation = (connection.total_changes() > initial_changes)
         .then(|| outbox_generation(&connection))
@@ -374,6 +408,7 @@ fn method_kind(method: &str) -> Option<Kind> {
         | "oldest_approval_request_created_at" => Kind::Snapshot,
         "workflow_capability_commit" => Kind::Write,
         "consume_native_review_approval"
+        | "settle_native_review_reuse"
         | "resolve_matching_approval_requests"
         | "resolve_approval_request"
         | "resolve_one_request_only"
@@ -411,6 +446,7 @@ fn method_kind(method: &str) -> Option<Kind> {
         | "clear_command_activity_evidence"
         | "upsert_guard_session"
         | "upsert_guard_operation"
+        | "link_codex_live_wait"
         | "add_guard_operation_item"
         | "attach_guard_client"
         | "renew_guard_client_attachment"
@@ -565,18 +601,24 @@ fn dispatch(
         "list_cached_advisories" => advisory_cache::list(connection, args),
         "consume_native_review_approval" => native_review_consume::consume(connection, args),
         "matching_native_review_block" => native_review_consume::matching_block(connection, args),
-        "add_approval_request" => add_approval_request(connection, source, args),
+        "settle_native_review_reuse" => native_review_consume::settle(connection, args),
+        "add_approval_request" => queue_with_live_wait(connection, args, |args| {
+            add_approval_request(connection, source, args)
+        })
+        .and_then(|written| stored_row(connection, guard_home, args, owner, written)),
         "queue_blocked_approvals" => queue_blocked_approvals(connection, source, args),
-        "add_native_review_approval_request" => {
+        "add_native_review_approval_request" => queue_with_live_wait(connection, args, |args| {
             add_native_review_approval_request(connection, source, args)
-        }
+        }),
         "add_silent_native_review_approval_request" => {
             add_silent_native_review_approval_request(connection, source, args)
+                .and_then(|written| stored_row(connection, guard_home, args, owner, written))
         }
         "add_claude_native_review_approval_request" => {
             add_claude_native_review_approval_request(connection, source, args)
         }
-        "add_claude_approval_request" => add_claude_approval_request(connection, source, args),
+        "add_claude_approval_request" => add_claude_approval_request(connection, source, args)
+            .and_then(|written| stored_row(connection, guard_home, args, owner, written)),
         "workflow_capability_plan" => wfcap::plan(connection, args),
         "workflow_capability_commit" => wfcap::commit(connection, args),
         "record_local_cli_observation" => local_cli::record_observation(connection, args),
@@ -602,6 +644,7 @@ fn dispatch(
         "get_guard_session" => sessions::get_session(connection, args),
         "list_guard_sessions" => sessions::list_sessions(connection, args),
         "upsert_guard_operation" => sessions::upsert_operation(connection, args),
+        "link_codex_live_wait" => sessions::link_codex_live_wait(connection, args),
         "get_guard_operation" => sessions::get_operation(connection, args),
         "list_guard_operations" => sessions::list_operations(connection, args),
         "get_guard_operation_for_approval_request" => {

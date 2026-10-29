@@ -496,6 +496,6 @@ mod hint;
 #[path = "hook_direct_review_connector_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "hook_direct_review_connector_prepare_tests.rs"]
 mod prepare_tests;

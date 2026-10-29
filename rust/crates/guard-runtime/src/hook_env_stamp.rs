@@ -1,6 +1,5 @@
 //! Port of `hook_execution_environment.py` (`stamp_hook_input_text`) and
-//! `codex_daemon_hook_transport.py::_with_remaining_hint` for the native
-//! Claude hook bridge.
+//! the remaining-time hint for the native hook bridges.
 //!
 //! Both rewrite the hook input the way CPython's `json.loads` + `json.dumps`
 //! would: object members keep their first position, numbers keep their

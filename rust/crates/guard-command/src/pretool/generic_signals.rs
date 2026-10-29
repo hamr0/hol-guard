@@ -17,7 +17,7 @@ pub(crate) const EMBEDDED_ARGUMENT_KEYS: [&str; 12] = [
 ];
 
 /// Every key whose value may name a file the tool reads or writes.
-const PATH_KEYS: [&str; 11] = [
+pub(super) const PATH_KEYS: [&str; 11] = [
     "path",
     "paths",
     "file",
@@ -248,6 +248,7 @@ pub(crate) fn extract_generic_signals(
         request_body_or_method: request_body_or_method(&maps),
         retrieval_arguments_only: retrieval_arguments_only(&argument_maps(root)),
         github_read_only: false,
+        mirrored_input_unproven: false,
         prompt_present: !prompt_values.is_empty(),
         env_reference,
         benign_prompt,

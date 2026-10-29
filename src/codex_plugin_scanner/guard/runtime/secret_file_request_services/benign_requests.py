@@ -13,7 +13,8 @@ from ..effect_contract import UncertaintyKind
 from ..effect_decision import DecisionFactorSource, DecisionReason, EffectDecision, FinalDisposition
 from ..extension_control_contract import ExtensionControlLayer
 from ..extension_control_runtime import ExtensionControlRuntimeSnapshot
-from .request_models import ToolActionRequestMatch, tool_action_risk_summary
+from .request_models import ToolActionRequestMatch
+from .tool_action_risk_summaries import tool_action_risk_summary
 
 # Artifact discovery can run before an authenticated native result exists, and
 # the sensitive request still has to be preserved at a review floor. The

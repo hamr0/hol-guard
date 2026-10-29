@@ -37,13 +37,11 @@ fn sibling_list(
     let target = super::super::segment_proof::verified_cwd_list_context(model, context, true)?;
     let workspace = std::fs::canonicalize(context.cwd?).ok()?;
     let target = PathBuf::from(target);
-    // The sink joins only an `&&` list after a sibling root; a pipe would
-    // leave the `cd` to run under the session workspace's profile.
+    // The sink joins only an `&&` list after a sibling root; any pipe but a
+    // command's own output bound would leave the `cd` to run under the
+    // session workspace's profile.
     if target.starts_with(&workspace)
-        || model
-            .segments
-            .iter()
-            .any(|segment| segment.pipeline_index != 0)
+        || !joined_filters(model)
         || super::super::contained_wrapper::sibling_project_root(&target, context.home_dir?)
             .as_deref()
             != Some(target.as_path())
@@ -53,6 +51,48 @@ fn sibling_list(
     let mut rest = model.clone();
     rest.segments.remove(0);
     Some((target, rest))
+}
+
+/// Whether every pipe in the list is one `| head -N` or `| tail -N` on the
+/// command before it, optionally after `2>&1`: the only filter the sink keeps
+/// when it joins two or more commands, leaving it in the text the root runs.
+/// One command after the `cd` takes no pipe here; `sibling_cd_root` reads
+/// that shape, as the sink peels its filter itself.
+fn joined_filters(model: &CanonicalCommandV1) -> bool {
+    let commands = model
+        .segments
+        .iter()
+        .filter(|segment| segment.pipeline_index == 0)
+        .count();
+    if commands < 3 {
+        return model
+            .segments
+            .iter()
+            .all(|segment| segment.pipeline_index == 0);
+    }
+    model
+        .segments
+        .iter()
+        .enumerate()
+        .all(|(index, segment)| match segment.pipeline_index {
+            0 => {
+                segment.arguments.last().map(String::as_str) != Some("2>&1")
+                    || model
+                        .segments
+                        .get(index + 1)
+                        .is_some_and(|next| next.pipeline_index == 1)
+            }
+            1 => {
+                matches!(segment.executable.as_deref(), Some("head" | "tail"))
+                    && segment.environment_names.is_empty()
+                    && segment.wrapper_chain.is_empty()
+                    && !segment.path_overridden
+                    && super::super::contained_wrapper::output_filters::head_tail_arguments(
+                        &segment.arguments,
+                    )
+            }
+            _ => false,
+        })
 }
 
 /// The repository root for `cd <absolute dir in a sibling repository> &&
@@ -143,7 +183,11 @@ fn sibling_anchor(model: &CanonicalCommandV1, context: PathContext<'_>) -> Optio
         || executable == "cd"
         || model
             .normalized_text
-            .contains(['<', '>', '|', '&', ';', '$', '`'])
+            .contains(['<', '>', '|', '&', ';', '`'])
+        || super::reach::expands_variable(
+            &model.normalized_text,
+            super::super::executable_basename(executable),
+        )
     {
         return None;
     }
@@ -151,8 +195,21 @@ fn sibling_anchor(model: &CanonicalCommandV1, context: PathContext<'_>) -> Optio
     let workspace = super::super::contained_wrapper::sibling_project_root(&cwd, home)
         .unwrap_or_else(|| cwd.clone());
     let words = || std::iter::once(executable).chain(segment.arguments.iter().map(String::as_str));
-    let anchor = std::fs::canonicalize(executed_path(executable, &segment.arguments)?).ok()?;
+    let edited = edited_paths(executable, &segment.arguments);
+    let anchor = match executed_path(executable, &segment.arguments) {
+        Some(path) => std::fs::canonicalize(path).ok()?,
+        None => edited.as_ref()?.first()?.clone(),
+    };
     let root = super::super::contained_wrapper::sibling_project_root(&anchor, home)?;
+    // The sandbox rooted there writes only the root itself, so every file an
+    // in-place edit rewrites must lie in it, not in the main checkout the
+    // sandbox can merely read.
+    if edited
+        .as_ref()
+        .is_some_and(|files| files.iter().any(|file| !file.starts_with(&root)))
+    {
+        return None;
+    }
     if anchor.starts_with(&workspace)
         || root.starts_with(&workspace)
         || workspace.starts_with(&root)
@@ -172,14 +229,25 @@ fn sibling_anchor(model: &CanonicalCommandV1, context: PathContext<'_>) -> Optio
 /// The absolute path a command runs from a sibling: the executable itself
 /// (`<root>/node_modules/.bin/vite build`), the script an interpreter is given
 /// first (`bun <root>/scripts/x.ts`), or the file `python3 -m py_compile`
-/// checks. A path that is only an operand (`rm`, `jq`, `rg`, `cat <root>/f`)
-/// runs nothing from the sibling, so it keeps its own proof or review.
+/// checks, or the manifest `cargo --manifest-path` builds. A path that is
+/// only an operand (`rm`, `jq`, `rg`, `cat <root>/f`) runs nothing from the
+/// sibling, so it keeps its own proof or review.
 fn executed_path<'a>(executable: &'a str, arguments: &'a [String]) -> Option<&'a str> {
     let absolute = |word: &&str| Path::new(word).is_absolute();
     if absolute(&executable) {
         return Some(executable);
     }
     let name = super::super::executable_basename(executable);
+    if name == "cargo" {
+        let options: Vec<&str> = arguments
+            .iter()
+            .map(String::as_str)
+            .take_while(|argument| *argument != "--")
+            .collect();
+        return super::compiled::manifest_path(&options)
+            .flatten()
+            .filter(absolute);
+    }
     let python = name == "python"
         || name.strip_prefix("python3").is_some_and(|minor| {
             minor.is_empty()
@@ -206,6 +274,76 @@ fn executed_path<'a>(executable: &'a str, arguments: &'a [String]) -> Option<&'a
         }
         _ => None,
     }
+}
+
+/// The existing files an in-place stream edit rewrites, resolved, in order:
+/// `sed -i '' 's/a/b/g' <root>/f …` or `perl -pi -e 's/a/b/g' <root>/f …`.
+/// Such an edit runs nothing from the sibling, but it writes only the files it
+/// names, so the same edit issued from their root confines it as tightly as a
+/// `cd <root> &&` prefix would. `None` for any other command and for a
+/// `perl` edit outside the shape `perl_edited_operands` reads. A relative
+/// word that names a path from the session directory keeps the review in
+/// `sibling_anchor`, and an absolute word that names nothing, such as a
+/// `/^$/d` sed script, is no file.
+fn edited_paths(executable: &str, arguments: &[String]) -> Option<Vec<PathBuf>> {
+    let operands: Vec<&str> = match super::super::executable_basename(executable) {
+        "sed" => {
+            let in_place = |word: &String| {
+                word == "--in-place"
+                    || word.starts_with("--in-place=")
+                    || word
+                        .strip_prefix('-')
+                        .filter(|flags| !flags.starts_with('-'))
+                        .and_then(|flags| {
+                            flags
+                                .trim_start_matches(['E', 'n', 'r', 's'])
+                                .strip_prefix('i')
+                        })
+                        .is_some()
+            };
+            if !arguments.iter().any(in_place) {
+                return None;
+            }
+            arguments.iter().map(String::as_str).collect()
+        }
+        "perl" => perl_edited_operands(arguments)?,
+        _ => return None,
+    };
+    let files: Vec<PathBuf> = operands
+        .iter()
+        .filter(|word| Path::new(word).is_absolute())
+        .filter_map(|word| std::fs::canonicalize(word).ok())
+        .collect();
+    (!files.is_empty()).then_some(files)
+}
+
+/// The file operands of `perl -pi -e <expression> <file>…`, with only the
+/// line-loop flags `-p`, `-n`, `-l`, `-a` and `-w` beside the in-place `-i`.
+/// An `-i` cluster ends at the `i`, since anything after it is a backup
+/// suffix; an expression cluster ends at its `e`.
+fn perl_edited_operands(arguments: &[String]) -> Option<Vec<&str>> {
+    let loop_flags = |flags: &str| flags.bytes().all(|byte| b"pnlaw".contains(&byte));
+    let (mut in_place, mut expression, mut index) = (false, false, 0);
+    while let Some(flags) = arguments.get(index).and_then(|word| word.strip_prefix('-')) {
+        if flags.strip_suffix('i').is_some_and(loop_flags) {
+            in_place = true;
+            index += 1;
+        } else if flags.strip_suffix('e').is_some_and(loop_flags) {
+            arguments.get(index + 1)?;
+            expression = true;
+            index += 2;
+        } else if !flags.is_empty() && loop_flags(flags) {
+            index += 1;
+        } else {
+            return None;
+        }
+    }
+    let files: Vec<&str> = arguments[index..].iter().map(String::as_str).collect();
+    (in_place
+        && expression
+        && !files.is_empty()
+        && files.iter().all(|file| Path::new(file).is_absolute()))
+    .then_some(files)
 }
 
 /// Whether `word` is `--max-old-space-size=<megabytes>` with a size Node
@@ -286,6 +424,10 @@ fn names_readable(segment: &CommandSegmentV1, directory: &Path, trees: &[PathBuf
                     .is_ok_and(|resolved| trees.iter().any(|tree| resolved.starts_with(tree)))
         })
 }
+
+#[cfg(test)]
+#[path = "workspace_contained_sibling_cargo_tests.rs"]
+mod cargo_tests;
 
 #[cfg(test)]
 mod heap_size_tests {

@@ -1,3 +1,4 @@
+use guard_contracts::GuardHookEnvelopeV2;
 use guard_policy_snapshot::PolicySnapshotV3;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -5,6 +6,11 @@ use sha2::{Digest, Sha256};
 pub(super) const MAX_HARNESS_BYTES: usize = 64;
 pub(super) const MAX_EVENT_BYTES: usize = 64;
 pub(super) const MAX_PATH_BYTES: usize = 32 * 1024;
+
+/// The edge echoes the envelope's request id verbatim on the result and on
+/// the receipt, so a caller that mints an id can tell this request's answer
+/// from another request's. A caller sees the guarantee through this feature.
+pub(crate) const REQUEST_BINDING_FEATURE: &str = "edge-request-binding-v1";
 
 pub(super) fn request_id_is_safe(value: &str) -> bool {
     let opaque_token = !value.is_empty()
@@ -182,4 +188,29 @@ pub(super) fn canonical_identity_digest(value: &Value, error_code: &str) -> Resu
     let canonical =
         guard_policy_snapshot::canonical_json_bytes(value).map_err(|_| error_code.to_owned())?;
     Ok(hex::encode(Sha256::digest(&canonical)))
+}
+
+/// Fence a one-time review approval to the action, its full source and the
+/// part of policy that can decide a verdict. The snapshot `generation` and
+/// `policy_digest` are deliberately absent: both move whenever the publisher
+/// republishes, including for observed state that cannot weaken a verdict, and
+/// a moved anchor strands the approval the identical retry was meant to find.
+pub(crate) fn review_anchor_digest(
+    envelope: &GuardHookEnvelopeV2,
+    snapshot: Option<&PolicySnapshotV3>,
+) -> Result<String, String> {
+    const FAILED: &str = "native_hook_review_anchor_digest_failed";
+    let harness = super::canonical_harness(&envelope.harness)?;
+    let event = super::authoritative_event(envelope)?;
+    let payload = request_payload_identity(&envelope.raw_payload, &harness, &event)?;
+    let value = serde_json::json!({
+        "schema": "guard-native-review-anchor.v1",
+        "version": 1,
+        "event": event,
+        "harness": harness,
+        "payload": payload,
+        "policy": verdict_policy_identity(snapshot, &envelope.policy_snapshot)?,
+        "source": super::request_source(envelope, FAILED)?,
+    });
+    canonical_identity_digest(&value, FAILED)
 }

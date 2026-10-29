@@ -171,14 +171,23 @@ fn a_local_row_an_identity_named_workspace_never_reads_does_not_stop_it() {
 #[test]
 fn an_identity_the_resident_does_not_resolve_exactly_defers() {
     let (home, connection) = store("portable-unknown");
-    let checkout = directory("unknown", Some(REMOTE));
-    // The daemon resolves the part of the name that exists and appends the
-    // rest unread; the resident reaches no part of a name it cannot open,
-    // so a workspace under a directory that is not there defers.
-    let missing = format!("{checkout}/not-here");
-    assert_eq!(resolve(&missing), PortableIdentity::Unknown);
+    // `expanduser` rewrites a `~` name against the asking process's
+    // environment, which the resident does not read, so the workspace
+    // settles to no identity at all rather than to none being there, and the
+    // saved lookup defers instead of composing a portable decision.
+    let unresolved = "~/not-here";
+    assert_eq!(resolve(unresolved), PortableIdentity::Unknown);
     assert_eq!(
-        status(&connection, &home, &missing),
+        status(&connection, &home, unresolved),
         Err(HookDirectDefer::SavedDecision)
     );
+
+    // A workspace under a directory that is not there is a different case:
+    // `resolve(strict=False)` appends the names that do not exist to the
+    // part that does, so it is read under the checkout above it.
+    let checkout = directory("unknown", Some(REMOTE));
+    assert!(matches!(
+        resolve(&format!("{checkout}/not-here")),
+        PortableIdentity::Identity(_)
+    ));
 }

@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -45,31 +46,34 @@ def _pause(
     binding: str | None = "binding",
     token: str | None = None,
     queue_fails: bool = False,
-) -> tuple[str, list[dict[str, object]]]:
+) -> tuple[str, list[dict[str, object]], dict[str, object]]:
     queued: list[dict[str, object]] = []
+    silent: dict[str, object] = {}
+
+    def silent_block(_harness: str, inputs: dict[str, Any], **_kwargs: object) -> dict[str, object]:
+        # The resident composes the block from these facts; its text is tested in
+        # `hook_decision_review_response_tests.rs`.
+        silent.update(inputs, verdict=inputs["result"])
+        return {"reason": inputs["setup_reason"] or inputs["result"]["reason"]}
 
     def queue(*_args: object, **kwargs: object) -> dict[str, object] | None:
         queued.append(kwargs)
         return None if queue_fails else {"request_id": "abc", "approval_url": _URL}
 
     for name, value in {
-        "native_review_policy_binding": lambda **_k: None,
-        "native_review_evidence": lambda **_k: (binding, token, None),
-        "native_local_cli_grant_response": lambda *_a, **_k: None,
-        "native_saved_review_response": lambda *_a, **_k: None,
-        "native_review_matching_block": lambda *_a, **_k: False,
-        "native_review_matching_allow": lambda *_a, **_k: False,
+        "review_evidence_parts": lambda _evidence: (True, binding, token, None),
+        "native_saved_decision_response": lambda *_a, **_k: None,
+        "native_review_settle": lambda *_a, **_k: None,
         "native_package_review_response": lambda *_a, **_k: None,
         "native_review_approval_center_url": lambda _store: "http://127.0.0.1:4781",
         "native_review_setup_connector": lambda *_a, **_k: connector,
         "queue_native_pre_tool_review": queue,
-        "record_silent_native_review_event": lambda *_a: None,
         # Rendering is native; the harness shape is tested with the renderers.
         "render_pre_tool": lambda _harness, verdict, **_k: dict(verdict),
         "render_pre_tool_review": lambda _harness, verdict, *, approval, **_k: {
             "reason": f"{verdict['reason']} {approval['approval_url']}"
         },
-        "native_review_reason": lambda _harness, reason, url, **_k: f"{reason} {url}",
+        "render_silent_review_block": silent_block,
     }.items():
         monkeypatch.setattr(review, name, value)
     mode = SimpleNamespace(blocked_request_mode="ask" if ask else "safe-alternative")
@@ -84,88 +88,95 @@ def _pause(
         workspace=tmp_path,
         guard_home=tmp_path / "guard",
     )
-    return json.dumps(response), queued
+    return json.dumps(response), queued, silent
 
 
 def test_default_mode_waits_for_the_users_approval_with_the_link(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    text, queued = _pause(tmp_path, monkeypatch, ask=False, connector=_CONNECTOR)
+    text, queued, silent = _pause(tmp_path, monkeypatch, ask=False, connector=_CONNECTOR)
 
     assert "HOL Guard has not been set up for `lanectl` (local CLI) on this device." in text
     assert "Allow once or Always allow" in text
     assert "waiting for the user to approve it" in text
     assert SAFE_ALTERNATIVE_GUIDANCE not in text
     assert "seek permission" not in text
-    assert _URL in text
+    # A local CLI's setup review is an ordinary approvable one, so the resident links it.
+    assert (silent["queued"], silent["request_id"], silent["approval_url"]) == (True, "abc", _URL)
+    assert (silent["ask"], silent["connector_is_local"], silent["retry_reuses_approval"]) == (False, True, True)
     assert queued[0]["connector"] == _CONNECTOR
 
 
 def test_a_setup_review_that_could_not_be_queued_never_says_it_is_waiting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    text, queued = _pause(tmp_path, monkeypatch, ask=False, connector=_CONNECTOR, queue_fails=True)
+    _text, queued, silent = _pause(tmp_path, monkeypatch, ask=False, connector=_CONNECTOR, queue_fails=True)
 
     assert queued
-    assert "waiting for the user to approve it" not in text
-    assert "Allow once or Always allow" not in text
-    assert _URL not in text
+    # With no row the resident drops the setup text and the link.
+    assert (silent["queued"], silent["request_id"], silent["approval_url"]) == (False, None, None)
 
 
 def test_ask_mode_waits_in_the_inbox_with_the_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    text, queued = _pause(tmp_path, monkeypatch, ask=True, connector=_CONNECTOR)
+    text, queued, silent = _pause(tmp_path, monkeypatch, ask=True, connector=_CONNECTOR)
 
     assert "has not been set up for `lanectl`" in text
     assert "Allow once or Always allow" in text
     assert "not an approval of this action" not in text
     assert _URL in text
+    assert not silent
     assert queued[0]["connector"] == _CONNECTOR
 
 
 def test_an_mcp_setup_review_keeps_the_silent_default_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mcp = replace(_CONNECTOR, name="echo-mcp", surface="mcp")
-    text, queued = _pause(tmp_path, monkeypatch, ask=False, connector=mcp)
+    text, queued, silent = _pause(tmp_path, monkeypatch, ask=False, connector=mcp)
 
     assert "has not been set up for `echo-mcp` (MCP server)" in text
     assert SAFE_ALTERNATIVE_GUIDANCE in text
-    assert _URL not in text
+    # A remote connector's setup reason in the default mode is never linked.
+    assert (silent["ask"], silent["connector_is_local"]) == (False, False)
     assert queued[0]["connector"] == mcp
 
 
 def test_a_package_script_is_labelled_as_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     scripts = replace(_CONNECTOR, name="build", surface="package-scripts")
-    text, _queued = _pause(tmp_path, monkeypatch, ask=False, connector=scripts)
+    text, _queued, silent = _pause(tmp_path, monkeypatch, ask=False, connector=scripts)
 
     assert "has not been set up for `build` (package script)" in text
     assert "Allow once or Always allow" in text
-    assert _URL in text
+    assert silent["connector_is_local"] is True
 
 
 def test_a_row_only_always_allow_can_release_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    text, queued = _pause(tmp_path, monkeypatch, ask=False, connector=_CONNECTOR, binding=None, token="exact-token")
+    _text, queued, silent = _pause(
+        tmp_path, monkeypatch, ask=False, connector=_CONNECTOR, binding=None, token="exact-token"
+    )
 
-    assert "just once will not" in text
-    assert "Always allow exact action" in text
-    assert "Allow once or Always allow" not in text
-    assert _URL in text
+    # The ordinary review text ("just once will not") says only Always allow can release it.
+    assert silent["setup_reason"] is None
+    assert (silent["retry_reuses_approval"], silent["exact_action_allowable"]) == (False, True)
+    assert silent["connector_is_local"] is True
     assert queued[0]["connector"] == _CONNECTOR
 
 
 def test_a_row_approval_cannot_release_gets_no_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    text, queued = _pause(tmp_path, monkeypatch, ask=True, connector=_CONNECTOR, binding=None)
+    text, queued, silent = _pause(tmp_path, monkeypatch, ask=True, connector=_CONNECTOR, binding=None)
 
     assert "has not been set up for `lanectl`" in text
     assert SAFE_ALTERNATIVE_GUIDANCE in text
     assert "inbox" not in text.lower()
-    assert _URL not in text
+    assert (silent["retry_reuses_approval"], silent["exact_action_allowable"]) == (False, False)
     assert queued[0]["connector"] == _CONNECTOR
 
 
 def test_an_ordinary_review_keeps_its_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    text, queued = _pause(tmp_path, monkeypatch, ask=False, connector=None)
+    text, queued, silent = _pause(tmp_path, monkeypatch, ask=False, connector=None)
 
     assert "has not been set up" not in text
     assert "could not prove this command is read-only" in text
+    assert silent["setup_reason"] is None
+    assert silent["verdict"] == _native_review()
     assert queued[0]["connector"] is None
 
 

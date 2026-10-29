@@ -88,6 +88,11 @@ _APPROVAL_KEYS = (
     "guardApprovalUrl",
     "approval_requests",
 )
+# Muse sizes its own hook timeout from this client's budget: the configured
+# approval wait plus this margin, twice the grace the adapter adds on each
+# side. Holding the margin back lets the wait run for as long as the user
+# configured instead of the fraction the other harnesses use.
+_MUSE_WAIT_BUDGET_MARGIN_SECONDS = 10.0
 _FAILURE_REASON = "HOL Guard could not complete a trusted hook decision. Retry or repair Guard from a terminal."
 _AUTHORITY_MARKER = "native command extension policy"
 _AUTHORITY_REMEDIATION = (
@@ -357,6 +362,13 @@ def _approval_wait_seconds() -> float:
         else:
             if parsed >= 0:
                 configured = parsed
+    if HARNESS == "muse":
+        # The Muse adapter sizes this client's budget from the same configured
+        # wait, so the wait only has to leave the adapter's margin back. The
+        # fraction below is tuned for a harness whose hook timeout is fixed,
+        # and it stays the floor for a budget too small to hold the margin.
+        budget = float(TIMEOUT_SECONDS)
+        return min(max(configured, 0.0), max(budget - _MUSE_WAIT_BUDGET_MARGIN_SECONDS, budget * 0.4))
     return min(max(configured, 0.0), min(float(TIMEOUT_SECONDS) * 0.4, 80.0))
 
 
@@ -514,6 +526,76 @@ def _apply_grok_wait(input_text: str, native: tuple[str, str, int]) -> tuple[str
     return text, stderr, 0 if allowed else exit_code
 
 
+def _rewrite_muse_decision(
+    payload: dict[str, object], *, allowed: bool, tool_input: object
+) -> dict[str, object]:
+    updated = dict(payload)
+    updated["decision"] = "allow" if allowed else "deny"
+    updated["policy_action"] = "allow" if allowed else "block"
+    if allowed:
+        updated.pop("reason", None)
+    hook_specific = updated.get("hookSpecificOutput")
+    rewritten = dict(hook_specific) if isinstance(hook_specific, dict) else {"hookEventName": "PreToolUse"}
+    rewritten["permissionDecision"] = "allow" if allowed else "deny"
+    if allowed:
+        rewritten.pop("permissionDecisionReason", None)
+        # Muse rejects a bare allow without updatedInput; echoing the
+        # reviewed input resumes the exact approved call.
+        if isinstance(tool_input, dict):
+            rewritten["updatedInput"] = tool_input
+    updated["hookSpecificOutput"] = rewritten
+    return updated
+
+
+def _apply_muse_wait(input_text: str, native: tuple[str, str, int]) -> tuple[str, str, int]:
+    stdout, stderr, exit_code = native
+    if HARNESS != "muse" or _event_name(input_text) != "PreToolUse":
+        return native
+    payload = _json_object(stdout)
+    if payload is None:
+        return native
+    if str(payload.get("policy_action") or "") not in {"review", "require-reapproval"}:
+        return native
+    request_ids = _approval_request_ids(payload)
+    if not request_ids:
+        return native
+    auth = _daemon_auth()
+    if auth is None:
+        return native
+    host, port, token = auth
+    wait_seconds = _approval_wait_seconds()
+    if wait_seconds <= 0:
+        return native
+    deadline = min(time.monotonic() + wait_seconds, _HOOK_DEADLINE_MONOTONIC)
+    resolved: dict[str, str] = {}
+    while time.monotonic() < deadline and len(resolved) < len(request_ids):
+        for request_id in request_ids:
+            if request_id in resolved:
+                continue
+            url = _loopback_url(host, port, "/v1/requests/" + quote(request_id, safe=""))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            status = _http_json(url, token, data=None, timeout=min(remaining, 1.0))
+            if status is None:
+                continue
+            action = status.get("resolution_action")
+            if isinstance(action, str) and action.strip():
+                resolved[request_id] = action.strip().lower()
+        if len(resolved) < len(request_ids):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.2, remaining))
+    if len(resolved) != len(request_ids):
+        return native
+    allowed = all(action == "allow" for action in resolved.values())
+    input_payload = _json_object(input_text) or {}
+    rewritten = _rewrite_muse_decision(payload, allowed=allowed, tool_input=input_payload.get("tool_input"))
+    text = json.dumps(rewritten, ensure_ascii=True, separators=(",", ":"))
+    return text, stderr, 0
+
+
 __GROK_HOOK_READINESS__
 __GROK_HOOK_INVOCATION__
 
@@ -546,7 +628,7 @@ def _post_hook(input_text: str) -> tuple[str, str, int] | None:
     parsed = _http_json(url, token, data=input_text.encode("utf-8"), timeout=timeout)
     if parsed is None:
         return None
-    return _apply_grok_wait(input_text, _to_native(parsed, _event_name(input_text)))
+    return _apply_muse_wait(input_text, _apply_grok_wait(input_text, _to_native(parsed, _event_name(input_text))))
 
 
 def main() -> int:

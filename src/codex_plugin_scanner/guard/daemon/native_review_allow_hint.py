@@ -310,33 +310,6 @@ def live_approval_extension_hint(
     )
 
 
-def reviewed_command_extension_allow_hint(
-    command: str,
-    *,
-    native_result: Mapping[str, object],
-    snapshot: ExtensionControlRuntimeSnapshot,
-    guard_home: Path,
-    cwd: Path | None,
-    home_dir: Path | None,
-) -> dict[str, object] | None:
-    """The allow hint for a command reviewed outside a hook, such as for a support bundle."""
-
-    if not hint_authority_admitted(snapshot):
-        return None
-    payload: dict[str, object] = {"tool_input": {"command": command}}
-    if cwd is not None:
-        payload["cwd"] = str(cwd)
-    hint = _ask_review_hint(
-        payload,
-        guard_home=guard_home,
-        workspace=None,
-        home_dir=home_dir,
-        budget_seconds=_DEFAULT_BUDGET_SECONDS,
-        paused=native_result,
-    )
-    return validated_extension_allow_hint(hint)
-
-
 def recovered_approval_extension_hint(
     stored: object,
     approval: Mapping[str, object],
@@ -375,5 +348,4 @@ __all__ = [
     "live_approval_extension_hint",
     "native_review_hint",
     "recovered_approval_extension_hint",
-    "reviewed_command_extension_allow_hint",
 ]
