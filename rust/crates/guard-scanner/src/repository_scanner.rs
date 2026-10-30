@@ -19,7 +19,8 @@ use serde::Serialize;
 
 use crate::git_read::{run_git, run_git_os, GIT_TIMEOUT_SECONDS};
 use crate::secret_detection::{
-    detector_version, scan_secret_text, EmptyFingerprintKeyError, PublicFinding, SecretFinding,
+    candidate_digest, detector_version, scan_secret_text, CandidateDigest, FingerprintError,
+    PublicFinding, SecretFinding,
 };
 
 /// `DEFAULT_MAX_FILES` from the Python module.
@@ -161,9 +162,7 @@ impl RepositorySecretScanResult {
     /// Public, non-sensitive payload matching Python `to_public_dict`.
     /// Fingerprints are omitted exactly like `finding.to_public_dict()` called
     /// with no key.
-    pub fn to_public_dict(
-        &self,
-    ) -> Result<PublicRepositorySecretScanResult<'_>, EmptyFingerprintKeyError> {
+    pub fn to_public_dict(&self) -> Result<PublicRepositorySecretScanResult<'_>, FingerprintError> {
         let mut findings = Vec::with_capacity(self.findings.len());
         for finding in &self.findings {
             findings.push(finding.to_public_dict(None)?);
@@ -681,13 +680,13 @@ pub fn scan_repository_secrets(
     // A provider rule can also be recognized by the contextual assignment
     // rule. Keep occurrences stable while preferring the stronger provider
     // format (higher confidence_score wins the dedup key).
-    let mut deduped: HashMap<(String, usize, String, Option<String>), SecretFinding> =
+    let mut deduped: HashMap<(String, usize, CandidateDigest, Option<String>), SecretFinding> =
         HashMap::new();
     for finding in findings {
         let key = (
             finding.path.clone(),
             finding.line,
-            finding.candidate.clone(),
+            candidate_digest(&finding.candidate),
             finding.commit.clone(),
         );
         match deduped.entry(key) {
