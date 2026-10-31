@@ -40,7 +40,7 @@ use crate::connector_setup::grant_lifts;
 use crate::local_store_read::{
     open_read_only, schema_version, table_exists, STORE_FILE_NAME, SUPPORTED_SCHEMA_VERSION,
 };
-use crate::policy_bundle_store_identities::cached_bundle_identities;
+use crate::policy_bundle_store_identities::{cached_bundle_authority, BundleAuthority};
 use crate::policy_store::policy_store_direct_lane::DirectLaneBinding;
 use crate::policy_store::PolicySnapshotStore;
 use base64ct::{Base64UrlUnpadded, Encoding};
@@ -281,7 +281,7 @@ fn saved_response(
         return Err(HookDirectDefer::SavedDecision);
     };
     let now = super::lifecycle::utc_now_isoformat().ok_or(HookDirectDefer::SavedDecision)?;
-    let bundle_identities = store.bundle_identities(&now)?;
+    let (bundle_identities, _) = store.bundle_authority(&now)?;
     let composition = portable::composition(context.workspace)?;
     let key_b64 = Zeroizing::new(Base64UrlUnpadded::encode_string(&key.key));
     let store_path = Path::new(context.guard_home).join(STORE_FILE_NAME);
@@ -310,6 +310,10 @@ fn saved_response(
         local_once_integrity_key_id: Some(key.key_id.clone()),
         policy_bundle_decision_identities: (!bundle_identities.is_empty())
             .then_some(bundle_identities),
+        // The lookup lifts Cloud-excepted bundle rules itself; the local and
+        // portable probes both match exceptions on the checkout path.
+        exception_workspace: Some(context.workspace.to_owned()),
+        cloud_exception_bundle: Default::default(),
         probe_groups: None,
         portable_workspace: None,
         evidence_binding: None,
@@ -521,16 +525,23 @@ impl StoreShape<'_> {
     }
 
     /// The decision identities the cached signed bundle authorizes at `now`,
-    /// which keep or drop a policy-bundle row; empty when the store holds no
-    /// such row. A bundle the resident cannot judge as the daemon would defers.
-    fn bundle_identities(&self, now: &str) -> Result<Vec<Vec<Value>>, HookDirectDefer> {
+    /// which keep or drop a policy-bundle row, and the bundle they came from;
+    /// empty when the store holds no such row. A bundle the resident cannot
+    /// judge as the daemon would defers.
+    fn bundle_authority(&self, now: &str) -> Result<BundleAuthority, HookDirectDefer> {
         if !self.any(
             "select 1 from policy_decisions where source = 'policy-bundle' limit 1",
             &[],
         )? {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
-        cached_bundle_identities(self.connection, now).ok_or(HookDirectDefer::SavedDecision)
+        #[cfg(test)]
+        if let Some(authority) =
+            crate::cloud_exception_lift::VALIDATED_BUNDLE.with(|bundle| bundle.borrow().clone())
+        {
+            return Ok(authority);
+        }
+        cached_bundle_authority(self.connection, now).ok_or(HookDirectDefer::SavedDecision)
     }
 
     fn any(&self, query: &str, values: &[&str]) -> Result<bool, HookDirectDefer> {

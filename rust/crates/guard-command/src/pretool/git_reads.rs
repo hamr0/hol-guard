@@ -15,6 +15,20 @@ fn has_argument(arguments: &[String], exact: &[&str], prefixes: &[&str]) -> bool
     })
 }
 
+/// Whether `value`, a `git grep` target, is a tracked document whose name
+/// only reads like a credential, such as a committed
+/// `command.kubernetes-secrets.json`. A leading option other than the pager
+/// switch can move Git elsewhere, so a relative target is proven only
+/// without one.
+fn tracked_target(value: &str, leading: &[String], context: super::PathContext<'_>) -> bool {
+    (std::path::Path::new(value).is_absolute()
+        || leading
+            .iter()
+            .all(|option| matches!(option.as_str(), "--no-pager" | "-P")))
+        && !super::sensitive_path_argument(value)
+        && super::search_scope_tracked::names::resolves_to_tracked(value, context.cwd)
+}
+
 pub(super) fn safe_git_arguments(
     arguments: &[String],
     allow_helper_context: bool,
@@ -47,8 +61,16 @@ pub(super) fn safe_git_arguments(
                 return leading_safe
                     && allow_helper_context
                     && super::git_grep::targets(rest).is_some_and(|targets| {
+                        // The tracked proof reads the working-tree file, so it
+                        // covers only pathspecs Git searches there: after a
+                        // `--` with no revision before it, and without
+                        // `--cached`, which searches the index instead.
+                        let working_tree = targets.first().is_some_and(|first| first == "--")
+                            && !rest.iter().any(|argument| argument == "--cached");
                         !targets.iter().any(|value| {
-                            value.starts_with(':') || super::sensitive_read_path_argument(value)
+                            value.starts_with(':')
+                                || (super::sensitive_read_path_argument(value)
+                                    && !(working_tree && tracked_target(value, leading, context)))
                         })
                     });
             }
@@ -209,10 +231,24 @@ pub(super) fn safe_git_arguments(
                 .iter()
                 .all(|option| matches!(option.as_str(), "--push" | "--all"));
     }
+    if subcommand == "remote" && arguments.get(1).is_some_and(|argument| argument == "show") {
+        // `show -n` prints what the configuration already holds about a
+        // remote and says so: `-n` is the switch that keeps Git from asking
+        // the remote itself, so the command stays inside the repository.
+        // Without it Git opens the connection, which is a different question
+        // than a read of the local configuration.
+        let (names, options): (Vec<&String>, Vec<&String>) = arguments[2..]
+            .iter()
+            .partition(|argument| !argument.starts_with('-'));
+        return !options.is_empty()
+            && options.iter().all(|option| option.as_str() == "-n")
+            && names.len() <= 1;
+    }
     if subcommand == "remote" {
+        // Bare `git remote` prints the configured names, which `-v` already
+        // prints beside their URLs.
         let has_arguments_after_options = option_end + 1 < arguments.len();
-        return !active_options.is_empty()
-            && !has_arguments_after_options
+        return !has_arguments_after_options
             && active_options
                 .iter()
                 .all(|argument| matches!(argument.as_str(), "-v" | "--verbose"));

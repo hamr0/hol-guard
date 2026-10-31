@@ -19,6 +19,7 @@ from .feature_directory_fixtures import (
     SESSION_PATH,
 )
 from .fixtures import SECURITY_NOTES, SOURCE, SOURCE_FILES
+from .realism_fixtures import VITE_BUILD_MARKER
 from .runtime_cases import OUTPUT as RUNTIME_OUTPUT
 from .runtime_cases import QUIET_CASES as RUNTIME_QUIET_CASES
 from .script_cases import REPORT_CASES, report_output
@@ -30,7 +31,7 @@ from .source_output_fixtures import (
     WORKER_MARKER,
     WORKER_PATH,
 )
-from .workspace_runner_fixtures import RUNNER_MARKER, WORKSPACE_JEST_CASE
+from .workspace_runner_fixtures import HOME_BUN_ENTRY_CASE, RUNNER_MARKER, WORKSPACE_RUNNER_CASES
 
 TOKEN_READ_CASE = "omp-native-read-token-handling-sources"
 TOKEN_SHELL_CASE = "omp-native-shell-cat-token-handling-sources"
@@ -44,6 +45,11 @@ WORKSPACE_GREP_CASE = "omp-native-grep-workspace-root"
 CLONE_GREP_CASE = "omp-native-shell-grep-clone-local-config"
 CLONE_SEARCH_CASES = frozenset({CLONE_GREP_CASE})
 WORKSPACE_FIND_CASE = "omp-native-shell-find-exec-grep-workspace-absolute"
+# Bun handed the installed package's own Node entry. The case pipes the build into `tail`,
+# which answers with its own successful status, so the build line is the only proof it ran.
+BUN_ENTRY_CASE = "omp-native-shell-linked-modules-bun-entry"
+# Both spellings of that launcher print the same build, so one check answers for either.
+BUN_ENTRY_CASES = frozenset({BUN_ENTRY_CASE, HOME_BUN_ENTRY_CASE})
 # Oh My Pi's bash tool adds its wall-time notice only to runs at least this long (milliseconds).
 WALL_TIME_NOTICE_MIN_MS = 1000
 # Every value in the fixture's local configuration files starts with this.
@@ -246,6 +252,14 @@ def _workspace_find_match(calls: list[dict[str, Any]]) -> bool:
     return text is not None and text.replace("\\", "/").splitlines() == ["{{workspace}}/src/settings.ts"]
 
 
+def _bun_entry_build_match(calls: list[dict[str, Any]]) -> bool:
+    """The installed build finished, rather than `tail` reporting its own success."""
+    if len(calls) != 1:
+        return False
+    text = _text(calls[0])
+    return text is not None and VITE_BUILD_MARKER in text
+
+
 def _workspace_runner_match(calls: list[dict[str, Any]]) -> bool:
     """The workspace's own runner actually launched, printing the line only it prints."""
     if len(calls) != 1:
@@ -268,8 +282,10 @@ def command_outputs_match(scenario: Scenario, calls: list[dict[str, Any]]) -> bo
         return _clone_search_match(scenario, calls)
     if scenario.id == WORKSPACE_FIND_CASE:
         return _workspace_find_match(calls)
-    if scenario.id == WORKSPACE_JEST_CASE:
+    if scenario.id in WORKSPACE_RUNNER_CASES:
         return _workspace_runner_match(calls)
+    if scenario.id in BUN_ENTRY_CASES:
+        return _bun_entry_build_match(calls)
     if scenario.id not in OUTPUT_SCENARIOS:
         return True
     if len(calls) != len(scenario.commands):

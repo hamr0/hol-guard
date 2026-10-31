@@ -10,7 +10,7 @@
 //! the caller, which passes every timestamp in the request.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use guard_contracts::{
     GuardStoreRequestV1, GuardStoreResultV1, GUARD_STORE_MAX_REQUEST_BYTES,
@@ -40,6 +40,7 @@ use crate::guard_store_claude_review::{
     add_claude_approval_request, add_claude_native_review_approval_request,
 };
 use crate::guard_store_clients as clients;
+use crate::guard_store_cloud_events as cloud_events;
 use crate::guard_store_cmd_activity as activity;
 use crate::guard_store_cmd_api as api;
 use crate::guard_store_cmd_feedback as feedback;
@@ -50,6 +51,8 @@ use crate::guard_store_composio_catalog as composio_catalog;
 use crate::guard_store_connect as connect;
 use crate::guard_store_connector_context as connector_context;
 use crate::guard_store_db::{exec, query_all, query_one, text, StoreError, StoreResult};
+use crate::guard_store_devices as devices;
+use crate::guard_store_evidence as evidence;
 use crate::guard_store_inventory as inventory;
 use crate::guard_store_local_cli as local_cli;
 use crate::guard_store_local_cli_catalog as local_cli_catalog;
@@ -61,6 +64,7 @@ use crate::guard_store_mcp_provider_reads as mcp_provider_reads;
 use crate::guard_store_mcp_workflow_reads as mcp_workflow_reads;
 use crate::guard_store_native_receipts as native_receipts;
 use crate::guard_store_native_review_consume as native_review_consume;
+use crate::guard_store_native_review_queue as native_review_queue;
 use crate::guard_store_observed_mcp as observed_mcp;
 use crate::guard_store_outbox_binding::{
     count_recoverable_unbound, load_binding, normalized_binding, reassign_quarantined,
@@ -74,6 +78,7 @@ use crate::guard_store_outbox_requeue::{repair_rejected_correlation, requeue_met
 use crate::guard_store_policy_source_context::policy_source_contexts;
 use crate::guard_store_policy_upsert::upsert_policy;
 use crate::guard_store_queue_live_wait::queue_with_live_wait;
+use crate::guard_store_read_state as read_state;
 use crate::guard_store_receipt_reads as receipt_reads;
 use crate::guard_store_receipt_rollups as receipt_rollups;
 use crate::guard_store_receipt_writes as receipt_writes;
@@ -182,34 +187,55 @@ fn evaluate_tracked(
     let path =
         crate::local_store_read::require_store_path(&request.store_path, &request.guard_home)
             .map_err(|_| StoreError::Invalid("native_guard_store_path_invalid"))?;
-    let kind = match method_kind(&request.method) {
+    // A paused review's request is built here and queued by the write it
+    // names, so everything below sees that method.
+    let started = Instant::now();
+    let delegated = (request.method == native_review_queue::METHOD)
+        .then(|| {
+            native_review_queue::delegate(&request.args, owner, request.busy_timeout_ms, |ask| {
+                crate::hook_direct::saved_decision::review_queue::connector::queued_lookup(
+                    &ask.request(request),
+                )
+            })
+        })
+        .transpose()?;
+    // The caller's deadline covers the whole call, so the write waits for the
+    // lock only as long as the hint left it. With nothing left a contended
+    // write fails at once rather than commit after the caller gave up.
+    let busy_timeout_ms = if delegated.is_some() {
+        let spent = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        request.busy_timeout_ms.saturating_sub(spent).max(1)
+    } else {
+        request.busy_timeout_ms
+    };
+    let (method, request_args) = match &delegated {
+        Some(delegated) => (delegated.method, &delegated.args),
+        None => (request.method.as_str(), &request.args),
+    };
+    let kind = match method_kind(method) {
         Some(kind) => kind,
         None => return invalid("native_guard_store_method_unknown"),
     };
     // A waiting Codex hook's live wait is built before the store opens its
     // write: proving the bridge process live can spawn `ps`.
-    let prepared = crate::codex_live_wait_build::prepare(
-        &request.method,
-        &request.args,
-        Path::new(&request.guard_home),
-    );
+    let prepared =
+        crate::codex_live_wait_build::prepare(method, request_args, Path::new(&request.guard_home));
     // A warm call reuses a kept connection: reopening parsed the whole schema
     // on every call (see `guard_store_write_cache`).
     let connection = crate::guard_store_write_cache::open_read_write_cached(&path)?;
-    connection.busy_timeout(Duration::from_millis(request.busy_timeout_ms))?;
+    connection.busy_timeout(Duration::from_millis(busy_timeout_ms))?;
     apply_pragmas(&connection)?;
     // A total read only writes for the one-time rebuild a migration requests;
     // every other call stays lock-free.
-    let args = Args(prepared.as_ref().unwrap_or(&request.args));
+    let args = Args(prepared.as_ref().unwrap_or(request_args));
     // A retry's block check alone writes nothing: it keeps the lock-free read
     // the separate block lookup had.
-    let kind = if request.method == "settle_native_review_reuse" && !args.flag("spend")? {
+    let kind = if method == "settle_native_review_reuse" && !args.flag("spend")? {
         Kind::Read
-    } else if (request.method == "count_receipts"
+    } else if (method == "count_receipts"
         && kind == Kind::Read
         && receipt_rollups::rebuild_pending(&connection)?)
-        || (connect::is_state_read(&request.method)
-            && connect::read_persists_expiry(&connection, &args)?)
+        || (connect::is_state_read(method) && connect::read_persists_expiry(&connection, &args)?)
     {
         Kind::Write
     } else {
@@ -226,11 +252,11 @@ fn evaluate_tracked(
         &connection,
         &request.source,
         &request.guard_home,
-        &request.method,
+        method,
         &args,
         owner,
     );
-    let payload = match outcome {
+    let mut payload = match outcome {
         Ok(payload) => payload,
         Err(error) => {
             if kind != Kind::Read {
@@ -240,6 +266,14 @@ fn evaluate_tracked(
             return Err(error);
         }
     };
+    // A connector-setup review's context is kept in the write that stored it.
+    if let (Some(delegated), Kind::Write) = (&delegated, kind) {
+        if let Some(code) = delegated.record_connector_context(&connection, &payload) {
+            if let Some(reply) = payload.as_object_mut() {
+                reply.insert("connector_context_error".to_owned(), Value::from(code));
+            }
+        }
+    }
     if kind == Kind::Snapshot {
         connection.execute_batch("ROLLBACK")?;
     } else {
@@ -251,6 +285,11 @@ fn evaluate_tracked(
     let generation = (connection.total_changes() > initial_changes)
         .then(|| outbox_generation(&connection))
         .transpose()?;
+    // A paused review's hook response is rendered once its row is stored.
+    let payload = match &delegated {
+        Some(delegated) => delegated.with_response(payload, &request.guard_home),
+        None => payload,
+    };
     Ok((payload, generation))
 }
 
@@ -358,6 +397,10 @@ fn method_kind(method: &str) -> Option<Kind> {
         | "get_guard_operation"
         | "list_guard_operations"
         | "get_guard_operation_for_approval_request"
+        | "get_read_state"
+        | "count_guard_events_v1"
+        | "get_request_resume"
+        | "get_latest_request_resume"
         | "list_guard_operation_items"
         | "get_guard_client_attachment"
         | "list_guard_client_attachments"
@@ -386,10 +429,23 @@ fn method_kind(method: &str) -> Option<Kind> {
         | "list_cached_advisories"
         | "policy_source_contexts"
         | "matching_native_review_block" => Kind::Read,
+        // Its lookup runs on the shared connection and its claim takes the
+        // write lock itself, so no transaction is held around them.
+        "settle_claimed_native_allow" => Kind::Read,
+        // Its exact Cloud read takes its own snapshot and its lookup opens its
+        // own connection, so no transaction is held around them.
+        "codex_live_allow_authority" => Kind::Read,
+        // Its authority lookup opens its own connection, so it takes the
+        // write lock itself only to record the continuation. That commit is
+        // its own, so the call reports no committed write: no caller retries
+        // it, and the outbox generation still follows its changes.
+        "complete_codex_live_decision" | "record_codex_live_completion" => Kind::Read,
         "list_command_activity_page"
         | "command_activity_analytics"
         | "list_command_activity_invalidations"
         | "command_activity_diagnostics"
+        | "list_evidence"
+        | "count_evidence"
         | "list_command_shadow_observations"
         | "observed_mcp_tool_actions"
         | "read_mcp_provider_choices"
@@ -415,6 +471,7 @@ fn method_kind(method: &str) -> Option<Kind> {
         | "resolve_harness_native_approval_request"
         | "apply_temporary_mcp_grant_resolution"
         | "apply_signed_remote_exact_result"
+        | "record_local_once_approval"
         | "resolve_request_with_queue_result"
         | "resolve_native_workspace_review_request"
         | "resolve_matching_duplicate_requests"
@@ -444,6 +501,8 @@ fn method_kind(method: &str) -> Option<Kind> {
         | "rebuild_command_activity_rollups"
         | "record_command_activity_feedback"
         | "clear_command_activity_evidence"
+        | "add_evidence"
+        | "clear_evidence"
         | "upsert_guard_session"
         | "upsert_guard_operation"
         | "link_codex_live_wait"
@@ -469,6 +528,15 @@ fn method_kind(method: &str) -> Option<Kind> {
         | "receipt_summary_between"
         | "receipt_analytics"
         | "reconcile_receipt_events"
+        | "mark_requests_read"
+        | "mark_request_unread"
+        | "clear_read_state"
+        | "set_device_label"
+        | "rotate_installation_id"
+        | "add_event"
+        | "add_guard_event_v1"
+        | "list_guard_events_v1"
+        | "mark_guard_events_v1_uploaded"
         | "maintain_storage"
         | "managed_keyring_reconcile"
         | "record_local_cli_observation"
@@ -579,6 +647,10 @@ fn dispatch(
         "record_command_activity_feedback" => feedback::record_feedback(connection, args),
         "list_command_activity_invalidations" => feedback::list_invalidations(connection, args),
         "clear_command_activity_evidence" => privacy::clear_evidence(connection),
+        "add_evidence" => evidence::add(connection, args),
+        "list_evidence" => evidence::list(connection, args),
+        "count_evidence" => evidence::count(connection, args),
+        "clear_evidence" => evidence::clear(connection, args),
         "command_activity_diagnostics" => privacy::diagnostics(connection, args),
         "count_command_shadow_observations" => privacy::count_shadow(connection),
         "list_command_shadow_observations" => privacy::list_shadow(connection, args),
@@ -650,6 +722,8 @@ fn dispatch(
         "get_guard_operation_for_approval_request" => {
             sessions::operation_for_approval_request(connection, args)
         }
+        "get_request_resume" => crate::codex_request_resume_store::get(connection, args),
+        "get_latest_request_resume" => crate::codex_request_resume_store::latest(connection, args),
         "add_guard_operation_item" => sessions::add_operation_item(connection, args),
         "list_guard_operation_items" => sessions::list_operation_items(connection, args),
         "attach_guard_client" => clients::attach_client(connection, args),
@@ -727,10 +801,25 @@ fn dispatch(
         "apply_temporary_mcp_grant_resolution" => {
             apply_temporary_mcp_grant(connection, guard_home, args, owner)
         }
+        "settle_claimed_native_allow" => {
+            crate::guard_store_claimed_native_allow::settle(connection, guard_home, args)
+        }
+        "codex_live_allow_authority" => {
+            crate::guard_store_codex_live_authority::op(connection, guard_home, args, owner)
+        }
+        "complete_codex_live_decision" => {
+            crate::guard_store_codex_live_completion::complete(connection, guard_home, args, owner)
+        }
+        "record_codex_live_completion" => {
+            crate::guard_store_codex_live_completion::record(connection, guard_home, args, owner)
+        }
         "apply_signed_remote_exact_result" => {
             crate::guard_store_exact_cloud_apply::apply_signed_remote_exact_result(
                 connection, guard_home, args, owner,
             )
+        }
+        "record_local_once_approval" => {
+            crate::guard_store_local_once_mint::record_local_once_approval(connection, args)
         }
         "resolve_request_with_queue_result" => {
             queue_result::resolve_request_with_queue_result(connection, guard_home, args, owner)
@@ -756,6 +845,17 @@ fn dispatch(
         "receipt_analytics" => receipt_reads::analytics(connection, args),
         "receipt_decision_counts" => receipt_reads::decision_counts(connection, args),
         "reconcile_receipt_events" => receipt_reads::reconcile_events(connection, args),
+        "mark_requests_read" => read_state::mark_read(connection, args),
+        "mark_request_unread" => read_state::mark_unread(connection, args),
+        "get_read_state" => read_state::ids(connection, args),
+        "clear_read_state" => read_state::clear(connection, args),
+        "set_device_label" => devices::set_label(connection, args),
+        "rotate_installation_id" => devices::rotate(connection, args),
+        "add_event" => cloud_events::add_event(connection, args),
+        "add_guard_event_v1" => cloud_events::add(connection, args),
+        "list_guard_events_v1" => cloud_events::list(connection, args),
+        "count_guard_events_v1" => cloud_events::count(connection, args),
+        "mark_guard_events_v1_uploaded" => cloud_events::mark_uploaded(connection, args),
         "maintain_storage" => storage_maintenance::maintain(connection, args),
         "run_storage_housekeeping" => storage_maintenance::housekeeping(connection),
         _ if connect::handles(method) => connect::dispatch(connection, method, args),

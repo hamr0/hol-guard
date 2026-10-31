@@ -124,6 +124,55 @@ fn every_contained_path_operation_is_one_the_screen_answers() {
 }
 
 #[test]
+fn the_corpus_carries_a_seed_each_screen_reads_as_its_own_request() {
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus/contained_path")
+        .canonicalize()
+        .expect("the contained_path corpus is checked in beside the fuzz targets");
+    let mut answered: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(&corpus).expect("the corpus directory reads") {
+        let seed =
+            std::fs::read(entry.expect("a corpus entry reads").path()).expect("a seed reads");
+        let Some((selector, rest)) = seed.split_first() else {
+            continue;
+        };
+        let Ok(request) = serde_json::from_slice::<serde_json::Value>(rest) else {
+            continue;
+        };
+        let Some(operation) = super::contained_screen(*selector) else {
+            let command = serde_json::from_value::<Vec<String>>(request["command"].clone())
+                .expect("the Git read seed is a command array");
+            if guard_command::git_read_only_invocation(&command) {
+                let _ = answered.insert("git_read_only_invocation");
+            }
+            continue;
+        };
+        if guard_command::contained_argv::evaluate(operation, &request)
+            .is_some_and(|reply| reply.get("value").is_some())
+        {
+            let _ = answered.insert(operation);
+        }
+    }
+    // `script_words`, `command_words` and `command_absolute_words` read a
+    // string rather than the `command` array every other screen reads, so a
+    // corpus of command requests would replay their seeds into an early error
+    // and never reach the lexer behind them.
+    // The Git read parser is reached by no operation, so its seed is the one
+    // way a campaign reads it.
+    for screen in [
+        "script_words",
+        "command_words",
+        "command_absolute_words",
+        "git_read_only_invocation",
+    ] {
+        assert!(
+            answered.contains(screen),
+            "no seed reaches the {screen} screen as a request it answers: {answered:?}"
+        );
+    }
+}
+
+#[test]
 fn a_contained_path_seed_reaches_every_screen_in_turn() {
     let request = br#"{"command":["npx","jest","-ic../outside/jest.config.js"]}"#;
     for selector in 0..=u8::try_from(super::CONTAINED_ARGV_OPERATIONS.len()).unwrap() {

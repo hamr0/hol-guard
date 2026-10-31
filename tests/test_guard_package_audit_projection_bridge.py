@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from codex_plugin_scanner.guard import native_package_audit_projection as bridge
+from codex_plugin_scanner.guard import native_workspace_inventory as inventory
 
 _STORE = SimpleNamespace(guard_home=Path("/tmp/guard-home-audit"), path=Path("/tmp/guard-home-audit/guard.db"))
 _RECEIPT = {
@@ -78,6 +80,51 @@ def test_aliases_maps_by_index_and_rejects_out_of_range(monkeypatch: pytest.Monk
         _patch(monkeypatch, bad)
         with pytest.raises(bridge.NativePackageAuditProjectionError):
             bridge.native_advisory_aliases([{}, {}], store=_STORE)
+
+
+def test_a_large_package_list_is_sent_in_bounded_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One request for every package of a large workspace outgrew the request
+    # limit; each batch stays within its bound and indices map back in order.
+    packages = [{"name": f"package-{index:05d}", "pad": "x" * 400} for index in range(6000)]
+    batches: list[list[object]] = []
+
+    def transport(request: dict[str, object], *_args: object, **_kwargs: object) -> dict[str, object]:
+        batch = request["query"]["packages"]  # type: ignore[index]
+        batches.append(batch)
+        return {"aliases": [{"index": len(batch) - 1, "aliases": [f"CVE-{len(batches)}"]}]}
+
+    monkeypatch.setattr(bridge, "_transport", transport)
+    aliases = bridge.native_advisory_aliases(packages, store=_STORE)
+    assert len(batches) >= 3
+    assert [package for batch in batches for package in batch] == packages
+    assert all(len(json.dumps(batch, separators=(",", ":"))) <= bridge._ALIAS_BATCH_BYTES for batch in batches)
+    ends = [sum(len(batch) for batch in batches[: number + 1]) - 1 for number in range(len(batches))]
+    assert aliases == {end: [f"CVE-{number + 1}"] for number, end in enumerate(ends)}
+
+
+def test_an_audit_deadline_stops_alias_batches_before_the_next_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    packages = [{"name": f"package-{index:05d}", "pad": "x" * 400} for index in range(6000)]
+    clock = [0.0]
+    batches: list[object] = []
+
+    def transport(request: dict[str, object], *_args: object, **_kwargs: object) -> dict[str, object]:
+        batches.append(request)
+        clock[0] += 4.0
+        return {"aliases": []}
+
+    monkeypatch.setattr(bridge, "_transport", transport)
+    monkeypatch.setattr(inventory.time, "monotonic", lambda: clock[0])
+
+    with inventory.audit_deadline(3), pytest.raises(inventory.AuditDeadlineError):
+        bridge.native_advisory_aliases(packages, store=_STORE)
+
+    assert len(batches) == 1
+
+
+def test_an_empty_package_list_still_asks_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _patch(monkeypatch, {"aliases": []})
+    assert bridge.native_advisory_aliases([], store=_STORE) == {}
+    assert len(seen) == 1
 
 
 def test_ci_gate_and_empty_outcome_validate_shape(monkeypatch: pytest.MonkeyPatch) -> None:

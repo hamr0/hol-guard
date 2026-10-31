@@ -23,7 +23,9 @@ from .hook_fail_closed import render_recording_only_pre_tool
 from .hook_native_review_approval import (
     pause_native_pre_tool_for_approval,
 )
+from .hook_native_saved_approval import native_exact_command_block_response
 from .hook_policy_fence_window import POLICY_SOURCE_FENCE_ERRORS, PolicySourceFenceBusyError
+from .hook_request_parsing import pre_tool_command
 from .hook_worker_native_review import (
     CONTROL_BINDING_REFRESH_ERRORS,
     SNAPSHOT_NOT_CURRENT_ERROR,
@@ -433,6 +435,7 @@ class HookWorkerNativeMixin:
                     claimed_saved_allow_hash=claimed_saved_allow_hash,
                     claimed_approval_request_id=claimed_approval_request_id,
                     local_cli_rule=cast("Mapping[str, object] | None", edge.get("local_cli_rule")),
+                    exact_command_block=edge.get("exact_command_block"),
                     review_evidence=cast("Mapping[str, object] | None", edge.get("review_evidence")),
                 )
                 return (_record_native_pre_activity(self, native_harness, payload, response, accepted_receipt), True)
@@ -450,6 +453,22 @@ class HookWorkerNativeMixin:
                     ),
                     True,
                 )
+            # A saved or Guard Cloud block on this exact command outranks the
+            # edge's allow; Watch records the call and lets it run.
+            if not recording_only:
+                command_block = native_exact_command_block_response(
+                    self.store,
+                    harness=native_harness,
+                    command=pre_tool_command(payload),
+                    native_result=native_result,
+                    workspace=workspace,
+                    edge_hint=edge.get("exact_command_block"),
+                )
+                if command_block is not None:
+                    return (
+                        _record_native_pre_activity(self, native_harness, payload, command_block, accepted_receipt),
+                        True,
+                    )
             from ..adapters.zcode_contained_tests import route_zcode_containment
 
             rendered = _edge_harness_response(edge)

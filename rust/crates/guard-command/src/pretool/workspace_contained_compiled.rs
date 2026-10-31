@@ -21,6 +21,14 @@
 //! stay out, which keeps registry tokens out of the run, and the fetching
 //! verbs keep the admission they have today.
 //!
+//! Cargo reads its own options in front of that verb, and a developer spells
+//! them there without changing what the run does: `cargo --offline test` and
+//! `cargo -q test` run the test the bare verb runs, and `--locked`,
+//! `--offline` and `--frozen` each ask for less than it does. They are read
+//! past, up to the first option this module does not know, so an option that
+//! names a config key, an unstable flag or another directory keeps the
+//! admission it has.
+//!
 //! Maven is admitted for the lifecycle phases that build and test the project
 //! the directory holds. Its plugins run dependency code the way `build.rs`
 //! does, which is what the sandbox bounds. The artifacts it resolves live in
@@ -46,10 +54,57 @@ const GO_LOCAL_VERBS: &[&str] = &[
 // into a target directory the workspace owns. Only the verbs that stay there
 // are local: `install`, `add`, `update`, `publish` and the rest reach a
 // registry, and `vendor` and `fetch` exist to populate a cache.
+//
+// The second group is the subcommands cargo resolves to a `cargo-NAME`
+// program the host already has. Each one named here drives cargo's own build
+// of the workspace and reads what it produced -- a coverage run of the test
+// suite, a snapshot suite, an expansion, a read of which dependencies the
+// crate uses -- so the work reaches no further than `test` and `build`
+// already do. A name that is not on this list keeps its review, because
+// cargo would run whatever program carries it.
 const CARGO_LOCAL_VERBS: &[&str] = &[
-    "build", "b", "test", "t", "check", "c", "clippy", "fmt", "doc", "d", "run", "r", "bench",
-    "tree", "metadata", "version", "nextest",
+    "build",
+    "b",
+    "test",
+    "t",
+    "check",
+    "c",
+    "clippy",
+    "fmt",
+    "doc",
+    "d",
+    "run",
+    "r",
+    "bench",
+    "tree",
+    "metadata",
+    "version",
+    "nextest",
+    "llvm-cov",
+    "tarpaulin",
+    "insta",
+    "expand",
+    "machete",
+    "udeps",
 ];
+// Cargo's own options stand in front of the verb. These say only how cargo
+// reports what it does, and how strictly it treats the lockfile and the
+// network: each of the last three narrows what a run may reach, so a line
+// carrying one asks for less than the bare verb does. Everything else cargo
+// reads there -- `--config`, `-Z`, `-C` -- changes what the run resolves or
+// where it looks for it, which is what the rest of this decision rests on.
+const CARGO_INERT_OPTIONS: &[&str] = &[
+    "-q",
+    "--quiet",
+    "-v",
+    "-vv",
+    "--verbose",
+    "--locked",
+    "--offline",
+    "--frozen",
+];
+// The one inert option that takes its value as the next word.
+const CARGO_COLOR_OPTION: &str = "--color";
 
 /// Whether `go` runs a local verb inside a module that `directory` holds.
 /// A module the directory holds is the one go finds by ascending from it, as
@@ -59,6 +114,27 @@ const CARGO_LOCAL_VERBS: &[&str] = &[
 /// argument names is one go resolves through the module proxy, and `go
 /// list`'s `-u` and `-versions` ask the proxy what else a module has, as does
 /// `-retracted`, so each of those keeps that admission too.
+///
+/// A leading `-C` is read by the caller, which moves `directory` to the one it
+/// names before this decision, because where the run stands is what the module
+/// search below rests on.
+/// The directory go's `-C` moves to, and how many words it takes.
+///
+/// go reads this flag only as the first word of the command and chdirs before
+/// it reads anything else, in either spelling, so the verb behind it is the
+/// work `cd <dir> && go <verb>` is. go itself ignores a `-C` with nothing
+/// behind it, and so does this.
+pub(super) fn go_chdir<'a>(arguments: &[&'a str]) -> Option<(&'a str, usize)> {
+    match arguments {
+        ["-C", target, rest @ ..] if !rest.is_empty() => Some((target, 2)),
+        [first, rest @ ..] if !rest.is_empty() => first
+            .strip_prefix("-C=")
+            .filter(|target| !target.is_empty())
+            .map(|target| (target, 1)),
+        _ => None,
+    }
+}
+
 pub(super) fn local_go_work(arguments: &[&str], directory: &Path, workspace: &Path) -> bool {
     let Some((verb, rest)) = arguments.split_first() else {
         return false;
@@ -82,9 +158,7 @@ pub(super) fn local_go_work(arguments: &[&str], directory: &Path, workspace: &Pa
 /// `--manifest-path` replaces that search with the manifest it names, which
 /// must be a `Cargo.toml` inside the workspace, spelled without a parent step.
 pub(super) fn local_cargo_work(arguments: &[&str], directory: &Path, workspace: &Path) -> bool {
-    let local_verb = arguments
-        .iter()
-        .find(|argument| !argument.starts_with('+'))
+    let local_verb = cargo_verb(arguments)
         .is_some_and(|verb| CARGO_LOCAL_VERBS.contains(&verb.to_ascii_lowercase().as_str()));
     local_verb
         && match manifest_path(arguments) {
@@ -95,6 +169,38 @@ pub(super) fn local_cargo_work(arguments: &[&str], directory: &Path, workspace: 
             })
             .is_some(),
         }
+}
+
+/// The verb cargo runs, read the way cargo reads it: past a `+toolchain`,
+/// past the options above, and stopping at the first word that is neither.
+/// `None` when an option this walk does not read stands in front of the verb,
+/// because what such an option sets -- a config key, an unstable flag, the
+/// directory cargo starts from -- is what the rest of this decision rests on.
+fn cargo_verb<'a>(arguments: &[&'a str]) -> Option<&'a str> {
+    let mut words = arguments.iter();
+    while let Some(word) = words.next() {
+        if word.starts_with('+') {
+            continue;
+        }
+        let Some(option) = word.strip_prefix('-') else {
+            return Some(word);
+        };
+        if option.is_empty() {
+            return None;
+        }
+        if CARGO_INERT_OPTIONS.contains(word) {
+            continue;
+        }
+        if *word == CARGO_COLOR_OPTION {
+            words.next()?;
+            continue;
+        }
+        if word.starts_with(&format!("{CARGO_COLOR_OPTION}=")) {
+            continue;
+        }
+        return None;
+    }
+    None
 }
 
 /// The manifest cargo's `--manifest-path` names, as the next argument or

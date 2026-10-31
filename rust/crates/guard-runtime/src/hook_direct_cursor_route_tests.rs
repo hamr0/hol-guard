@@ -1,6 +1,8 @@
 //! Cursor's route probe and the contained sink it rewrites a call into.
 
-use super::{admit_sink, daemon_answer, probe_answer, route, unreviewed_probe, Route, Scope};
+use super::{
+    admit_sink, daemon_answer, probe_answer, route, unreviewed_probe, CursorDefer, Route, Scope,
+};
 use crate::codex_hook_bridge::contain::discard;
 use crate::hook_direct::HookDirectDefer;
 use serde_json::{json, Map, Value};
@@ -123,12 +125,14 @@ fn only_a_named_probe_and_a_before_shell_sink_take_the_cursor_route() {
     assert_eq!(route(&probe("make build", "/repo")).unwrap(), Route::Probe);
     assert_eq!(route(&receipt_unset).unwrap(), Route::Probe);
     assert_eq!(route(&sink_call(sink)).unwrap(), Route::Sink);
-    // The daemon reviews every other call naming the probe or the sink.
-    for payload in [unnamed, elsewhere, receipt_only] {
-        assert!(matches!(
-            route(&payload),
-            Err(HookDirectDefer::PayloadUnsupported)
-        ));
+    // The daemon reviews every other call naming the probe or the sink, and
+    // each one counts under the reason it was handed over.
+    for (payload, reason) in [
+        (unnamed, CursorDefer::ProbeUnnamed),
+        (elsewhere, CursorDefer::SinkSource),
+        (receipt_only, CursorDefer::ReceiptOnly),
+    ] {
+        assert_eq!(route(&payload), Err(HookDirectDefer::Cursor(reason)));
     }
 }
 
@@ -190,17 +194,43 @@ fn a_sandboxed_probe_runs_in_the_sink_and_the_sink_is_admitted_as_written() {
     let digest_start = command.find("--request-sha256").unwrap() + "--request-sha256 ".len();
     let mut tampered = command.clone();
     tampered.replace_range(digest_start..digest_start + 1, "Z");
-    for (call, scope) in [
-        (sink_call(&command), &other_home),
-        (sink_call(&tampered), &scope),
-        (sink_call(&format!("{command} --extra")), &scope),
-        (sink_call(&command.replace(HOME, "/home/other")), &scope),
+    let elsewhere = tempfile::tempdir().unwrap();
+    let other_workspace = elsewhere.path().to_str().unwrap();
+    // A request outside the temporary directory is no snapshot the rewrite
+    // writes.
+    let other_request = "/opt/guard-elsewhere/request/request.json";
+    for (call, scope, reason) in [
+        (sink_call(&command), &other_home, CursorDefer::SinkArgv),
+        (sink_call(&tampered), &scope, CursorDefer::SinkArgv),
+        (
+            sink_call(&format!("{command} --extra")),
+            &scope,
+            CursorDefer::SinkArgv,
+        ),
+        (
+            sink_call(&command.replace(HOME, "/home/other")),
+            &scope,
+            CursorDefer::SinkArgv,
+        ),
+        (
+            sink_call(&command.replace(&format!("--home {HOME}"), "--home /home/other")),
+            &scope,
+            CursorDefer::SinkHome,
+        ),
+        (
+            sink_call(&command.replace(&workspace, other_workspace)),
+            &scope,
+            CursorDefer::SinkWorkspace,
+        ),
+        (
+            sink_call(&command.replace(&request, other_request)),
+            &scope,
+            CursorDefer::SinkSnapshot,
+        ),
     ] {
-        assert!(
-            matches!(
-                admit_sink(&call, scope),
-                Err(HookDirectDefer::PayloadUnsupported)
-            ),
+        assert_eq!(
+            admit_sink(&call, scope),
+            Err(HookDirectDefer::Cursor(reason)),
             "{call:?}"
         );
     }
@@ -321,4 +351,67 @@ fn the_daemon_path_refuses_a_request_missing_its_binding() {
             "{params:?}"
         );
     }
+}
+
+#[test]
+fn a_native_scope_runs_the_runtime_sink_and_admits_only_this_runtime() {
+    let (_directory, workspace) = workspace();
+    let scope = scope(&workspace).with_native_sink();
+    let answer = probe_answer(
+        &sandboxed_edge("sink"),
+        &probe("make build", &workspace),
+        &scope,
+    );
+    let command = routed_command(&answer).to_owned();
+    let request = request_file(&command);
+    let argv = crate::mcp_proxy_shlex::split_with(&command, "", "").unwrap();
+    let runtime = std::env::current_exe().unwrap();
+    assert_eq!(
+        argv[..2],
+        [runtime.to_str().unwrap(), "contained-workspace-sink"]
+    );
+    assert_eq!(route(&sink_call(&command)).unwrap(), Route::Sink);
+    assert!(admit_sink(&sink_call(&command), &scope).is_ok());
+    // The same argv naming any other executable takes the daemon's review.
+    let mut other = argv.clone();
+    other[0] = "/opt/elsewhere/hol-guard".to_owned();
+    assert_eq!(
+        admit_sink(&sink_call(&crate::mcp_proxy_shlex::join(&other)), &scope),
+        Err(HookDirectDefer::Cursor(CursorDefer::SinkArgv))
+    );
+    discard(Path::new(&request));
+
+    // A call that leaves the directory to the top level runs there too.
+    let mut plain = probe("make build", &workspace);
+    plain.insert("tool_input".to_owned(), json!({ "command": "make build" }));
+    let answer = probe_answer(&sandboxed_edge("sink"), &plain, &scope);
+    let command = routed_command(&answer).to_owned();
+    let argv = crate::mcp_proxy_shlex::split_with(&command, "", "").unwrap();
+    assert_eq!(argv[1], "contained-workspace-sink");
+    discard(Path::new(&request_file(&command)));
+}
+
+#[test]
+fn the_daemon_path_runs_the_runtime_sink_only_when_the_daemon_admits_it() {
+    let (_directory, workspace) = workspace();
+    let edge: Value = serde_json::from_slice(&sandboxed_edge("sink")).unwrap();
+    let mut params = daemon_params(&workspace, probe("make build", &workspace), Some(edge));
+    let head = |params: &Map<String, Value>| {
+        let response = daemon_answer(params).unwrap().unwrap();
+        let command = routed_command(&json!({ "harness_response": response })).to_owned();
+        discard(Path::new(&request_file(&command)));
+        crate::mcp_proxy_shlex::split_with(&command, "", "").unwrap()[1].clone()
+    };
+    // An older daemon reviews the runtime's sink command, so it gets Guard's.
+    assert_eq!(head(&params), "-I");
+    params.insert("native_sink".to_owned(), json!(true));
+    assert_eq!(head(&params), "contained-workspace-sink");
+}
+
+#[test]
+fn the_native_sink_verb_is_the_runtime_sink_command() {
+    assert_eq!(
+        super::NATIVE_SINK_VERB,
+        crate::contained_workspace_sink::SINK_COMMAND
+    );
 }

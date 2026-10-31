@@ -35,10 +35,7 @@ from codex_plugin_scanner.guard.live_process_identity import (
     process_start_token,
 )
 from codex_plugin_scanner.guard.store import GuardStore
-from codex_plugin_scanner.guard.store_local_once_authority import (
-    EXACT_CLOUD_AUTHORITY_KIND,
-    persist_local_once_approval,
-)
+from codex_plugin_scanner.guard.store_event_receipts import EXACT_CLOUD_AUTHORITY_KIND
 from tests.native_pretool_edge_fixtures import canonical_receipt_bytes
 from tests.native_review_evidence_support import with_review_evidence
 from tests.test_native_command_observations import _edge, _observations, _receipt
@@ -175,26 +172,20 @@ def _allow_from_cloud(store: GuardStore, request_id: str, workspace: Path) -> No
     )
     resolved = store.get_approval_request(request_id)
     assert resolved is not None
-    key, key_id = store._policy_integrity_secret_material(create=True)  # pyright: ignore[reportPrivateUsage]
-    assert key is not None and key_id is not None
     created_at = str(resolved["resolved_at"])
     expires_at = (datetime.fromisoformat(created_at) + timedelta(hours=1)).isoformat()
-    with store._connect() as connection:  # pyright: ignore[reportPrivateUsage]
-        approval_id = persist_local_once_approval(
-            connection,
-            request_id=request_id,
-            harness=_HARNESS,
-            artifact_id=str(resolved["artifact_id"]),
-            artifact_hash=str(resolved["artifact_hash"]),
-            workspace=str(resolved["workspace"]),
-            publisher=None,
-            action="allow",
-            created_at=created_at,
-            expires_at=expires_at,
-            integrity_key=key,
-            integrity_key_id=key_id,
-            authority_kind=EXACT_CLOUD_AUTHORITY_KIND,
-        )
+    approval_id = store.record_local_once_approval(
+        request_id=request_id,
+        harness=_HARNESS,
+        artifact_id=str(resolved["artifact_id"]),
+        artifact_hash=str(resolved["artifact_hash"]),
+        workspace=str(resolved["workspace"]),
+        publisher=None,
+        action="allow",
+        created_at=created_at,
+        expires_at=expires_at,
+        authority_kind=EXACT_CLOUD_AUTHORITY_KIND,
+    )
     assert approval_id is not None
 
 
@@ -390,9 +381,9 @@ def test_the_request_its_waiting_operation_and_resume_record_are_one_store_call(
     writes: list[str] = []
 
     def record(method: str, args: dict[str, object]) -> object:
-        if method in {"add_approval_request", "link_codex_live_wait", "upsert_guard_session", "upsert_guard_operation"}:
+        if method in {"queue_native_review", "link_codex_live_wait", "upsert_guard_session", "upsert_guard_operation"}:
             writes.append(method)
-            if method == "add_approval_request":
+            if method == "queue_native_review":
                 # The hook sends the bridge's facts; the resident builds the wait.
                 assert set(cast("dict[str, object]", args["codex_live_wait_facts"])) == {
                     "process",
@@ -407,7 +398,7 @@ def test_the_request_its_waiting_operation_and_resume_record_are_one_store_call(
     assert isinstance(request_id, str)
     # The operation is written before the request in the same transaction,
     # so the request is never approvable without it.
-    assert writes == ["add_approval_request"]
+    assert writes == ["queue_native_review"]
     session = store.get_guard_session(f"codex-hook-{request_id}")
     assert session is not None
     assert (session["harness"], session["status"], session["capabilities"]) == (
@@ -434,7 +425,7 @@ def test_a_wait_that_cannot_be_linked_is_queued_as_a_manual_retry(
     native_store_call = store._native_store_call
 
     def unlinkable(method: str, args: dict[str, object]) -> object:
-        if method == "add_approval_request":
+        if method == "queue_native_review":
             # An older hook's prebuilt wait the resident refuses to link; the
             # queue write still runs.
             args = {key: value for key, value in args.items() if key != "codex_live_wait_facts"}

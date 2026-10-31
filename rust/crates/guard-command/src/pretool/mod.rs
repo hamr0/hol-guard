@@ -40,8 +40,8 @@ mod brace_group;
 mod contained_wrapper;
 mod contained_wrapper_plan;
 pub use contained_wrapper_plan::{
-    contained_wrapper_plan, ContainedOutput, ContainedWrapperCore, ContainedWrapperPlan,
-    CONTAINED_WRAPPER_PLAN_UNSUPPORTED,
+    contained_wrapper_plan, ContainedOutput, ContainedWorktreeAdd, ContainedWrapperCore,
+    ContainedWrapperPlan, CONTAINED_WORKTREE_ADD_REASON, CONTAINED_WRAPPER_PLAN_UNSUPPORTED,
 };
 pub(crate) mod curl_reads;
 pub use curl_reads::bound_curl_read_destinations;
@@ -128,6 +128,8 @@ pub(crate) mod github_conversation;
 mod glob_words;
 mod guard_diagnostics;
 mod guard_names;
+mod help_probes;
+mod installed_program_path;
 mod list_wrapper;
 mod listing_reads;
 mod listing_temporary;
@@ -159,7 +161,9 @@ mod read_paths;
 mod source_reads;
 use source_reads::{plain_source_code_path, sensitive_command_input, source_file_read_segment};
 mod recursive_copy;
+mod ref_name_words;
 mod restricted_test_commands;
+pub(crate) use restricted_test_commands::{manager_local_bin_arguments, manager_script_task};
 mod rust_toolchain;
 mod rustfmt_writes;
 mod safe_links;
@@ -171,11 +175,12 @@ mod script_content;
 pub(crate) use script_content::{argv_script, ArgvScript};
 mod search;
 mod search_pattern_clearance;
+mod search_pattern_text;
 mod search_scope;
 mod search_scope_filter;
 mod search_scope_glob;
 mod search_scope_ignore;
-mod search_scope_tracked;
+pub(crate) mod search_scope_tracked;
 mod search_scope_walk;
 mod secret_aliases;
 pub(crate) mod sed_edits;
@@ -215,6 +220,7 @@ pub use git_push::{
     install_git_push_verdict, push_environment_git, GitPushRequest, GitPushVerdict,
 };
 pub(crate) use git_read_after_allow::git_reads_after_allowed_steps;
+pub use read_paths::proven_repository_hidden_document;
 pub use safe_scalar::PsqlEnvironment;
 #[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use script_content::launch_loopback_ports;
@@ -222,6 +228,7 @@ pub(crate) use script_content::{
     activation_script_text, backgrounded_launch, models_exactly, prefixed_launch, sequential_jobs,
     sole_program_sources, sourced_program_sources, sourcing_bounded_sources,
 };
+pub use search_scope_tracked::proven_project_document;
 pub(crate) use segment_proof::{benign_command_segments, without_stderr_merge};
 pub(crate) use worktree_add::entered_checkouts;
 pub(crate) use worktree_add::new_checkout_route;
@@ -778,6 +785,7 @@ fn exact_safe_command_with_context(
         return false;
     }
     if segment_proof::exact_safe_cwd_compound(model, allow_git_helper_context, context)
+        || segment_proof::exact_safe_absolute_cd_chain(model, allow_git_helper_context, context)
         || safe_reads::exact_safe_sequence(model, allow_git_helper_context, context)
     {
         return true;
@@ -1245,10 +1253,8 @@ fn evaluate_single_command(
             "The Rust command authority proved this bounded command explicitly benign.",
         ));
     }
-    if git_search_text::sensitive_beyond_patterns(
-        &data_heredocs::without_data_bodies(normalized),
-        git_search_text::command_without_patterns(&model),
-    ) || secret_aliases::names_secret_alias(&model, context)
+    if search_pattern_text::command_sensitive(&model, normalized, context.cwd)
+        || secret_aliases::names_secret_alias(&model, context)
         || glob_words::names_hidden_glob(&model, context)
     {
         return Ok(pretool_decision(

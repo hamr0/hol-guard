@@ -504,6 +504,10 @@ fn git_inspections_require_protected_execution_not_helper_consent() {
         "git diff --check",
         "git log --oneline -1",
         "git show HEAD",
+        "git blame README.md",
+        "git grep needle",
+        "git stash show -p",
+        "git reflog",
     ] {
         let result = classify("omp", command);
         assert_eq!(result.decision, "deny");
@@ -786,7 +790,7 @@ fn windows_contains_direct_vite_builds_of_a_flat_install() {
         pager_disabled: false,
         xdg_config_home: None,
         git_config_no_system: false,
-        library_search_paths: Default::default(),
+        ..Default::default()
     };
     let classify_in = |harness: &str, command: &str, cwd: &str| {
         guard_command::pretool::evaluate_pre_tool_envelope_with_execution_context(

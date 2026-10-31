@@ -216,6 +216,18 @@ pub(crate) fn home_targets_unquoted(segment: &crate::CommandSegmentV1) -> bool {
         || !shell_keeps_tilde_literal(&segment.text)
 }
 
+/// Whether a `~`-spelled executable reaches the shell as the home path the
+/// path proofs resolve it to. A quoted or escaped `~` stays a literal
+/// relative name, which the shell looks for under the working directory —
+/// the one place the agent writes without review.
+pub(crate) fn home_executable_unquoted(segment: &crate::CommandSegmentV1) -> bool {
+    !segment
+        .executable
+        .as_deref()
+        .is_some_and(|executable| executable.starts_with('~'))
+        || !shell_keeps_tilde_literal(&segment.text)
+}
+
 /// Search reads also accept a quoted `~` when the working directory has no
 /// `~` entry: the literal relative path then names nothing, so the search
 /// reads nothing, and the home spelling has already cleared the read screens.
@@ -434,7 +446,7 @@ impl<'a> super::PathContext<'a> {
                 environment.has_valid_shape()
                     && !environment.environment_names.iter().any(|name| {
                         npm_selector(name)
-                            && !super::npm_environment::inert_npm_config_name(name)
+                            && !super::npm_environment::inert_stamped_name(environment, name)
                             && !super::npm_environment::trusted_stamped_loader(
                                 environment,
                                 name,
@@ -447,7 +459,7 @@ impl<'a> super::PathContext<'a> {
                 let name = name.to_string_lossy();
                 !value.is_empty()
                     && npm_selector(&name)
-                    && !super::npm_environment::inert_npm_config_name(&name)
+                    && !super::npm_environment::inert_inherited(&name, &value)
             }),
         };
         // pip reads a configuration file and a variable for every option

@@ -4113,6 +4113,10 @@
     }
   }
 
+  .bg-slate-950 {
+    background-color: var(--color-slate-950);
+  }
+
   .bg-slate-950\/45 {
     background-color: #02061873;
   }
@@ -5470,6 +5474,10 @@
 
   .text-slate-50 {
     color: var(--color-slate-50);
+  }
+
+  .text-slate-100 {
+    color: var(--color-slate-100);
   }
 
   .text-slate-200 {
@@ -8962,6 +8970,11 @@ input:focus-visible, button:focus-visible, a:focus-visible {
   color: var(--extension-brand, var(--brand-blue));
   transition: transform .16s var(--ease-out-quart);
   box-shadow: 0 1px 2px #3f41740f;
+}
+
+.guard-extension-mark[data-kind="guard"] {
+  border-color: var(--brand-dark);
+  background: var(--brand-dark);
 }
 
 .guard-extension-mark[data-size="sm"] {

@@ -126,6 +126,7 @@ mod cli_copilot_resolution;
 mod cli_runtime_support_op;
 mod cloud_action_envelope;
 mod cloud_action_envelope_fields;
+mod cloud_exception_lift;
 mod cloud_receipt_payload;
 #[cfg(test)]
 mod cloud_receipt_vectors_tests;
@@ -152,6 +153,7 @@ mod codex_hooks;
 #[cfg(test)]
 mod codex_hooks_parity_tests;
 mod codex_identity;
+mod codex_live_operation;
 mod codex_live_wait_build;
 mod codex_proxy;
 mod codex_request_resume_busy;
@@ -162,6 +164,7 @@ mod codex_thread_continue_op;
 mod codex_value;
 #[cfg(all(test, unix))]
 mod codex_vectors_tests;
+mod command_capability_issue_op;
 mod command_capability_op;
 mod command_effect;
 mod command_envelope_op;
@@ -196,11 +199,13 @@ mod consumer_result;
 mod consumer_url;
 #[cfg(unix)]
 mod contained_op;
+mod contained_test_request;
 #[cfg(unix)]
 mod contained_workspace_grant_plan;
 #[cfg(unix)]
 mod contained_workspace_sink;
 mod contained_wrapper_plan_op;
+mod content_decode;
 mod content_sensitivity_op;
 mod context_digest;
 mod context_digest_json;
@@ -332,8 +337,10 @@ mod guard_store_approval_row;
 mod guard_store_approval_sweep;
 mod guard_store_approval_write;
 mod guard_store_args;
+mod guard_store_claimed_native_allow;
 mod guard_store_claude_review;
 mod guard_store_clients;
+mod guard_store_cloud_events;
 mod guard_store_cmd_activity;
 mod guard_store_cmd_api;
 mod guard_store_cmd_feedback;
@@ -346,6 +353,8 @@ mod guard_store_cmd_rollups;
 #[cfg(test)]
 mod guard_store_cmd_vectors_tests;
 mod guard_store_cmd_wire;
+mod guard_store_codex_live_authority;
+mod guard_store_codex_live_completion;
 mod guard_store_composio_catalog;
 #[cfg(test)]
 mod guard_store_composio_catalog_tests;
@@ -355,7 +364,10 @@ mod guard_store_connect_effective;
 mod guard_store_connect_vectors_tests;
 mod guard_store_connector_context;
 mod guard_store_db;
+mod guard_store_devices;
+mod guard_store_evidence;
 mod guard_store_exact_cloud_apply;
+mod guard_store_exact_cloud_peek;
 mod guard_store_guard_event;
 #[cfg(test)]
 mod guard_store_guard_event_tests;
@@ -388,6 +400,7 @@ mod guard_store_local_cli_mcp_snapshot;
 mod guard_store_local_cli_vectors_tests;
 mod guard_store_local_mcp_declarations;
 mod guard_store_local_mcp_observation;
+mod guard_store_local_once_mint;
 mod guard_store_mcp_provider_reads;
 #[cfg(test)]
 mod guard_store_mcp_reads_tests;
@@ -398,6 +411,7 @@ mod guard_store_native_receipts_tests;
 mod guard_store_native_review_consume;
 #[cfg(test)]
 mod guard_store_native_review_consume_tests;
+mod guard_store_native_review_queue;
 mod guard_store_observed_mcp;
 mod guard_store_op;
 mod guard_store_outbox_append;
@@ -417,6 +431,7 @@ mod guard_store_policy_source_labels;
 mod guard_store_policy_source_rows;
 mod guard_store_policy_upsert;
 mod guard_store_queue_live_wait;
+mod guard_store_read_state;
 mod guard_store_receipt_analytics;
 mod guard_store_receipt_approval;
 mod guard_store_receipt_decision;
@@ -486,6 +501,8 @@ mod hook_artifact_facts_op;
 mod hook_authority_state_op;
 mod hook_bridge_daemon_start;
 mod hook_bridge_fallback;
+#[cfg(unix)]
+mod hook_bridge_successor;
 mod hook_cli_claude_text;
 mod hook_cli_emit;
 mod hook_cli_emit_redaction;
@@ -735,6 +752,7 @@ mod request_context_shell;
 mod resident_client;
 mod resident_diagnostics;
 mod resident_endpoint;
+mod resident_health_counters;
 mod resident_health_op;
 mod resident_inspection_host;
 mod resident_inspection_services;

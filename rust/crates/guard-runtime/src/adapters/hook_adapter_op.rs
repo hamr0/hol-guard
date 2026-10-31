@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 
 /// A typed failure: `code` plus an optional detail the Python side maps back
 /// to the exception the old in-process path raised.
-struct Failure {
+pub(crate) struct Failure {
     code: String,
     payload: Option<Value>,
 }

@@ -13,7 +13,7 @@ use crate::hook_direct::saved_decision::review_request::{
     result_command_category, review_envelope, tagged,
 };
 use crate::{native_decision_receipt, pyjson};
-use guard_command::hook_adapter_value::OValue;
+use guard_command::hook_adapter_value::{OMap, OValue};
 use guard_contracts::{
     ReviewRequestQueryV1, NATIVE_BASH_ARTIFACT_ID, NATIVE_BASH_REVIEW_ARTIFACT_TYPE,
     NATIVE_BASH_REVIEW_DESCRIPTOR_SCHEMA,
@@ -39,6 +39,23 @@ fn invalid() -> Failure {
 
 /// The `GuardApprovalRequest` fields the queue sets, in the adapter's wire form.
 pub(super) fn review_request(query: &ReviewRequestQueryV1) -> Result<Value, Failure> {
+    let built = build(query)?;
+    let request =
+        OValue::from_wire(&tagged(&Value::Object(built.request))).map_err(Failure::code)?;
+    Ok(request.to_wire_with_refs(&ref_digests(&built.payload)))
+}
+
+/// A paused review's request as plain JSON, with the hook payload it read.
+pub(crate) struct Built {
+    /// The `GuardApprovalRequest` fields the queue sets.
+    pub(crate) request: Map<String, Value>,
+    /// The hook payload as plain JSON.
+    pub(crate) fields: Map<String, Value>,
+    payload: OMap,
+}
+
+/// The request [`review_request`] answers, before its wire encoding.
+pub(crate) fn build(query: &ReviewRequestQueryV1) -> Result<Built, Failure> {
     let (envelope, payload) = envelope_map(&query.envelope)?;
     let Value::Object(fields) = plain(&OValue::Map(payload.clone()))? else {
         return Err(invalid());
@@ -129,8 +146,14 @@ pub(super) fn review_request(query: &ReviewRequestQueryV1) -> Result<Value, Fail
         "raw_command_text": command,
         "queue_group_id": queue_group_id,
     });
-    let request = OValue::from_wire(&tagged(&request)).map_err(Failure::code)?;
-    Ok(request.to_wire_with_refs(&ref_digests(&payload)))
+    let Value::Object(request) = request else {
+        return Err(invalid());
+    };
+    Ok(Built {
+        request,
+        fields,
+        payload,
+    })
 }
 
 /// A valid receipt that authenticates its origin; the envelope keeps only that.

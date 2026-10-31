@@ -17,6 +17,31 @@ import subprocess
 from pathlib import Path
 
 WORKSPACE_JEST_CASE = "omp-native-workspace-npx-jest"
+# The same install, launched the way a Node project's own scripts name it: the
+# installed entry point relative to the workspace root rather than through
+# ``node_modules/.bin``.
+WORKSPACE_NODE_ENTRY_CASE = "omp-native-workspace-node-jest-entry"
+# The same install, launched through npm's own exec spelling with the install
+# prompt already answered. ``--no`` forbids fetching anything, so the run only
+# finishes if the workspace's own runner is what npm resolves.
+WORKSPACE_NPM_EXEC_CASE = "omp-native-workspace-npm-exec-inert-option"
+# The same install, launched with the heap size a large suite needs written in
+# front of it. The setting only sizes the engine, so the run has to finish the
+# same way the unprefixed launch does.
+WORKSPACE_HEAP_PREFIX_CASE = "omp-native-workspace-node-options-heap-prefix"
+WORKSPACE_RUNNER_CASES = frozenset(
+    {
+        WORKSPACE_JEST_CASE,
+        WORKSPACE_NODE_ENTRY_CASE,
+        WORKSPACE_NPM_EXEC_CASE,
+        WORKSPACE_HEAP_PREFIX_CASE,
+    }
+)
+# The same installed build, launched through the Bun the installer leaves in the
+# caller's home, spelled by the path its install instructions print.
+HOME_BUN_ENTRY_CASE = "omp-native-shell-home-spelled-bun-entry"
+# Where Bun's own installer puts it, and the path its instructions tell you to run.
+_BUN_BIN = ".bun/bin"
 # Where nvm, the way most developers install Node, keeps each release.
 _NODE_VERSIONS = ".nvm/versions/node"
 _NODE_VERSION = re.compile(r"v\d+\.\d+\.\d+")
@@ -52,7 +77,7 @@ _FILES = {
 
 def add_workspace_test_runner(workspace: Path, scenario_id: str | None) -> None:
     """Install the runner inside the workspace, untracked as ``npm install`` leaves it."""
-    if scenario_id != WORKSPACE_JEST_CASE:
+    if scenario_id not in WORKSPACE_RUNNER_CASES:
         return
     for relative, text in _FILES.items():
         target = workspace / relative
@@ -84,7 +109,7 @@ def add_workspace_node_runtime(home: Path, scenario_id: str | None) -> None:
     owns. The host's Node is copied, not linked, so nothing the fixture does
     can reach the file the host runs.
     """
-    if scenario_id != WORKSPACE_JEST_CASE:
+    if scenario_id not in WORKSPACE_RUNNER_CASES:
         return
     located = shutil.which("node")
     if located is None:
@@ -98,3 +123,41 @@ def add_workspace_node_runtime(home: Path, scenario_id: str | None) -> None:
     target = home / _NODE_VERSIONS / version / "bin" / "node"
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
+
+
+def home_bun_bin(home: Path) -> Path | None:
+    """The fixture's own Bun directory, once a case has planted one.
+
+    Bun's installer adds this directory to the login shell's PATH, so a
+    developer shell that runs ``~/.bun/bin/bun`` also has it on PATH.
+    """
+    directory = home / _BUN_BIN
+    return directory if (directory / "bun").is_file() else None
+
+
+def _host_bun() -> str | None:
+    """The host's Bun, skipping a Guard package shim that stands in front of it.
+
+    A shim is a script that hands the launch to Guard's own runtime, so a copy
+    of it would plant Guard's launcher, not Bun, where the case runs Bun.
+    """
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    search = [entry for entry in entries if Path(entry).parts[-2:] != ("package-shims", "bin")]
+    return shutil.which("bun", path=os.pathsep.join(search))
+
+
+def add_home_bun_runtime(home: Path, scenario_id: str | None) -> None:
+    """Install Bun where its own installer puts it, so a case can name it from home.
+
+    An agent runs the launcher the install instructions give it,
+    ``~/.bun/bin/bun``. The host's binary is copied rather than linked, so
+    nothing the fixture does can reach the file the host runs.
+    """
+    if scenario_id != HOME_BUN_ENTRY_CASE:
+        return
+    located = _host_bun()
+    if located is None:
+        raise RuntimeError("Gauntlet prerequisite is missing: bun")
+    target = home / _BUN_BIN / "bun"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(os.path.realpath(located)), target)

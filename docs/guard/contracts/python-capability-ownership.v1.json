@@ -1859,6 +1859,47 @@
     "rust/crates/guard-runtime/src/content_sensitivity_op.rs",
     "rust/crates/guard-runtime/src/edge_structured.rs"
    ]
+  },
+  {
+   "path": "src/codex_plugin_scanner/guard/runtime/command_action_risk_metadata.py",
+   "module": "codex_plugin_scanner.guard.runtime.command_action_risk_metadata",
+   "source_sha256": "d8c96d66bd936b9db7c431420dc168918aee6d6dad27f96e1f563aef125caf43",
+   "forbidden_symbols": [
+    "risk_classes_for_command_action",
+    "COMMAND_ACTION_RISK_CLASSES",
+    "_BASE_COMMAND_ACTION_RISK_CLASSES",
+    "BLITCP_ACTION_RISK_CLASSES",
+    "GITHUB_ACTION_RISK_CLASSES",
+    "OLLAMA_ACTION_RISK_CLASSES"
+   ],
+   "native_replacements": [
+    "rust/crates/guard-command/src/command_action_risk_classes.rs",
+    "rust/crates/guard-runtime/src/hook_artifact_facts_op.rs"
+   ]
+  },
+  {
+   "path": "src/codex_plugin_scanner/guard/runtime/local_cli_runner.py",
+   "module": "codex_plugin_scanner.guard.runtime.local_cli_runner",
+   "source_sha256": "13340152570b07e144ad87c60afa7831b1e2d160667bc24ccefaacaba87f59ed",
+   "forbidden_symbols": [
+    "runner_name",
+    "runner_target",
+    "_split_runner_arguments"
+   ],
+   "native_replacements": [
+    "rust/crates/guard-runtime/src/native_exact_action_op/runner_bin.rs"
+   ]
+  },
+  {
+   "path": "src/codex_plugin_scanner/guard/runtime/command_reviewed_literal_matcher.py",
+   "module": "codex_plugin_scanner.guard.runtime.command_reviewed_literal_matcher",
+   "source_sha256": "60cd955b234541b6cb5f835c2a8e29190cbaab418bec2d309de9f8e64676212b",
+   "forbidden_symbols": [
+    "validate_reviewed_literal_argv"
+   ],
+   "native_replacements": [
+    "rust/crates/guard-command/src/command_reviewed_literal.rs"
+   ]
   }
  ],
  "retired_test_paths": [
@@ -1898,6 +1939,39 @@
   "tests/test_guard_shell_static_path_boundaries.py"
  ],
  "retired_bodies": [
+ {
+  "path": "src/codex_plugin_scanner/guard/runtime/effect_contract.py",
+  "source_sha256": "9038e0b37af50bedc19d635fb3be92bfe0ec9cfc91771fcfbbf376271e71e8d3",
+  "forbidden_symbols": [
+   "UNCERTAINTY_FLOOR"
+  ],
+  "native_replacements": [
+   "rust/crates/guard-command/src/effect_decision.rs"
+  ]
+ },
+ {
+  "path": "src/codex_plugin_scanner/guard/runtime/command_model.py",
+  "source_sha256": "11ab5a21f22eefd813957346a81606209bb78b85e0941f84a35c42af5ce5ee6a",
+  "forbidden_symbols": [
+   "MAX_COMMAND_SEGMENTS",
+   "MAX_COMMAND_TOKENS"
+  ],
+  "native_replacements": [
+   "rust/crates/guard-command/src/command_model.rs",
+   "rust/crates/guard-command/src/command_parse_surface.rs"
+  ]
+ },
+ {
+  "path": "src/codex_plugin_scanner/guard/runtime/approval_reuse.py",
+  "source_sha256": "d0b0a011a9f33c5de6390ecad17cbfb3fc492ad3c8fd2e00b8b0d5d47f0e1d55",
+  "forbidden_symbols": [
+   "APPROVAL_REUSE_REAPPROVAL_REQUIRED",
+   "APPROVAL_REUSE_CONTEXT_CHANGED_AFTER_CLAIM"
+  ],
+  "native_replacements": [
+   "rust/crates/guard-command/src/approval_reuse.rs"
+  ]
+ },
   {
    "path": "src/codex_plugin_scanner/guard/policy_document.py",
    "source_sha256": "c20051517d9e4c1a4ead1dea82e80bbc348adbc3082d8ae6baf7cc430157c3d3",
@@ -2423,6 +2497,33 @@
     "rust/crates/guard-contracts/src/inventory_item_classification.rs",
     "rust/crates/guard-command/src/inventory_item_metadata.rs",
     "rust/crates/guard-runtime/src/inventory_item_classification_op.rs"
+   ]
+  },
+  {
+   "path": "src/codex_plugin_scanner/guard/native_policy_snapshot_constants.py",
+   "source_sha256": "69f505d30daa7f9d0d5f68177b7a1de3233a4cee7a2556f249bf9c563daa30ef",
+   "forbidden_symbols": [
+    "_ACTION_SEVERITY",
+    "_VALID_ACTIONS"
+   ],
+   "native_replacements": [
+    "rust/crates/guard-contracts/src/decision_lattice.rs",
+    "rust/crates/guard-policy-snapshot/src/lib.rs"
+   ]
+  },
+  {
+   "path": "src/codex_plugin_scanner/guard/runtime/command_activity_lifecycle.py",
+   "source_sha256": "aa240d99aee2f85396db7a7176be2671c72aa984e34872bd3818e40d431c955b",
+   "forbidden_symbols": [
+    "_RULE_MODE_FLOOR",
+    "_SEVERITY",
+    "_UNCERTAINTY_REASON",
+    "_UNMAPPED_RISK_CLASS_EFFECTS"
+   ],
+   "native_replacements": [
+    "rust/crates/guard-command/src/command_decision_adapter.rs",
+    "rust/crates/guard-command/src/command_model.rs",
+    "rust/crates/guard-command/src/native_command_controls_floor.rs"
    ]
   }
  ]

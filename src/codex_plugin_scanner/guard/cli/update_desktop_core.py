@@ -29,7 +29,7 @@ from packaging.version import InvalidVersion, Version
 from ..macos_code_signing import verified_macos_signing_team
 from ..mdm.contracts import ManagedNetworkPolicy
 from ..mdm.network import ManagedNetworkError, managed_urlopen
-from .desktop_core_paths import executable_is_desktop_core
+from .desktop_core_paths import executable_is_desktop_core, installed_desktop_app_version
 
 UPDATE_SCHEMA = "hol-guard-core-update.v1"
 ONEDIR_UPDATE_SCHEMA = "hol-guard-core-update.v2"
@@ -441,8 +441,19 @@ def _parse_onedir_manifest(
     }
 
 
+def _desktop_version() -> str:
+    launched_by = os.environ.get("HOL_GUARD_DESKTOP_VERSION", "").strip()
+    if launched_by or sys.platform != "darwin":
+        return launched_by
+    # Run from a terminal there is no Desktop environment. Read the installed
+    # app instead, or the update swaps the Desktop's onedir Core for the slower
+    # onefile build.
+    installed = installed_desktop_app_version()
+    return str(installed) if installed is not None else ""
+
+
 def _enforce_minimum_desktop_version(minimum: str) -> None:
-    installed = os.environ.get("HOL_GUARD_DESKTOP_VERSION", "").strip()
+    installed = _desktop_version()
     if not installed:
         return
     try:
@@ -484,7 +495,7 @@ def _try_apply_onedir(
     expected_version: str,
     expected_target: str,
 ) -> Path | None:
-    if not os.environ.get("HOL_GUARD_DESKTOP_VERSION", "").strip():
+    if not _desktop_version():
         return None
     try:
         raw = downloader(_release_url(tag, f"{artifact}.onedir.json"), _MAX_MANIFEST_BYTES)
@@ -815,14 +826,31 @@ def _install_managed_core(staged: Path, manifest: _ParsedCoreManifest, target: s
     version_dir.mkdir(parents=True, exist_ok=True)
     for path in (root, versions_root, version_dir, installed):
         _reject_symlink(path)
-    _ = shutil.copy2(staged, installed)
+    # Stage beside the target and rename over it. Copying onto an existing
+    # executable rewrites the same inode, and macOS keeps the code signature it
+    # cached for that inode, so a reinstall of the same version is killed on
+    # its next launch even though the file on disk verifies. The candidate is
+    # a new file under a name no other install uses: a predictable name could
+    # already be a hard link to the installed binary, or another update's
+    # candidate.
+    descriptor, candidate_name = tempfile.mkstemp(prefix=f".{_executable_name()}.", suffix=".tmp", dir=version_dir)
+    candidate = Path(candidate_name)
+    try:
+        with os.fdopen(descriptor, "wb") as destination, staged.open("rb") as source:
+            shutil.copyfileobj(source, destination)
+        shutil.copystat(staged, candidate)
+        _reject_symlink(candidate)
+        _make_executable(candidate)
+        _verify_candidate(
+            candidate,
+            expected_team=_macos_signing_team(Path(sys.executable)) if sys.platform == "darwin" else None,
+            expected_sha256=manifest["sha256"],
+        )
+        _reject_symlink(installed)
+        _ = candidate.replace(installed)
+    finally:
+        candidate.unlink(missing_ok=True)
     _reject_symlink(installed)
-    _make_executable(installed)
-    _verify_candidate(
-        installed,
-        expected_team=_macos_signing_team(Path(sys.executable)) if sys.platform == "darwin" else None,
-        expected_sha256=manifest["sha256"],
-    )
     pointer = {
         "schema": INSTALL_SCHEMA,
         "version": manifest["version"],

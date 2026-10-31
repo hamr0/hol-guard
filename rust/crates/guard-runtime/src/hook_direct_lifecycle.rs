@@ -90,7 +90,7 @@ fn event_name(payload: &Map<String, Value>) -> Result<&str, HookDirectDefer> {
 }
 
 /// The harness response `fail_closed_response` returns for `event`.
-fn constant_response(harness: &str, event: &str) -> Value {
+pub(crate) fn constant_response(harness: &str, event: &str) -> Value {
     // `fail_closed_response` answers every Grok lifecycle hook with `{}`.
     if harness == GROK {
         return json!({});
@@ -161,7 +161,7 @@ pub(super) fn answer(
         .direct_lane_home_dir()
         .ok_or(HookDirectDefer::BindingIncomplete)?;
     // The daemon passes a hook through for a harness Guard does not manage.
-    let store = crate::local_store_read::hook_store_probe(Path::new(guard_home), harness)
+    let store = crate::local_store_read::hook_store_probe(Path::new(guard_home), harness, None)
         .map_err(|_| HookDirectDefer::HarnessUnmanaged)?;
     if store.harness_unmanaged {
         return Err(HookDirectDefer::HarnessUnmanaged);

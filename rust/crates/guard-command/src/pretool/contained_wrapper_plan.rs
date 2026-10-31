@@ -14,6 +14,13 @@ use std::path::PathBuf;
 /// the Python peel's `ValueError` did.
 pub const CONTAINED_WRAPPER_PLAN_UNSUPPORTED: &str = "native_contained_wrapper_plan_unsupported";
 
+/// The reason a `git worktree add <checkout> && cd <checkout> && <checks>`
+/// chain carries when Guard creates the checkout outside the sandbox and then
+/// runs the checks in it contained. A receipt naming it stays with the sink
+/// that plans the same split.
+pub const CONTAINED_WORKTREE_ADD_REASON: &str =
+    super::generic::contained_publish::worktree::REASON_TEXT;
+
 /// How the sink handles the core's output.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContainedOutput {
@@ -27,6 +34,19 @@ pub struct ContainedOutput {
     pub status_label: Option<String>,
     /// Each stage of a `pipe` chain, as its program followed by arguments.
     pub stages: Vec<Vec<String>>,
+}
+
+/// A `git worktree add <checkout> && cd <checkout> && <checks>` chain, split
+/// the way the classifier split it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainedWorktreeAdd {
+    /// The `git worktree add`, run outside the sandbox.
+    pub add: String,
+    /// `cd <checkout> && <checks>`, judged again once the checkout exists.
+    pub entered: String,
+    /// The directory the `cd` enters, resolved from the workspace. `None`
+    /// when the spelling names a home the request did not declare.
+    pub checkout: Option<PathBuf>,
 }
 
 /// The core the sink runs, and where.
@@ -50,6 +70,10 @@ pub struct ContainedWrapperPlan {
     /// The sibling repository holding the directory the caller asked about,
     /// independently of the command.
     pub project_root: Option<PathBuf>,
+    /// For `git worktree add <checkout> && cd <checkout> && <checks>`, the
+    /// add, the `cd <checkout> && <checks>` that follows it, and the checkout
+    /// both of them name.
+    pub worktree_add: Option<ContainedWorktreeAdd>,
 }
 
 /// Peel `command` the way the sink runs it.
@@ -68,8 +92,21 @@ pub fn contained_wrapper_plan(
     let project_root = project_root_query.and_then(|directory| {
         contained_wrapper::sibling_project_root(std::path::Path::new(directory), home_dir?)
     });
+    let worktree_add = super::generic::contained_publish::worktree::split(command).map(|parts| {
+        let checkout = super::generic::contained_publish::worktree::resolved_checkout(
+            &parts.destination,
+            workspace,
+            home_dir,
+        );
+        ContainedWorktreeAdd {
+            add: parts.add,
+            entered: parts.entered,
+            checkout,
+        }
+    });
     ContainedWrapperPlan {
         project_root,
+        worktree_add,
         ..wrapper_plan(
             command,
             workspace,

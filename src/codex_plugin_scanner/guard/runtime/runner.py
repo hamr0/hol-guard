@@ -74,6 +74,7 @@ from ..policy_bundle_parser import (
     CANONICAL_COMPILE_REJECTION_PREFIX,
     non_empty_string,
     policy_bundle_acceptance_checkpoint,
+    policy_bundle_cloud_exceptions_hash,
     policy_bundle_is_enforceable,
     policy_bundle_is_version_downgrade,
     policy_bundle_rejection_message,
@@ -162,6 +163,12 @@ _POLICY_DOCUMENT_VERSIONS = ("guard.hashgraphonline.com/v1alpha1",)
 _POLICY_BUNDLE_VERSIONS = ("guard-policy-bundle.v1", "guard-policy-bundle.v2")
 _POLICY_CONTRACTS = ("guard-policy-bundle/v1", "guard-policy-bundle/v2")
 _POLICY_YAML_IMPORT_ENV = "HOL_GUARD_POLICY_YAML_IMPORT"
+# The canonical compiler turns an exact `match.commands` rule into the same
+# exact-shell-command rows the hook looks up, so Guard Cloud may deliver exact
+# command rules in a v2 bundle to a device that advertises this.
+POLICY_EXACT_COMMAND_RULES_CAPABILITY = "policy-document-exact-commands.v1"
+# Accepts Cloud exceptions signed into a v2 bundle (``cloudExceptions``).
+POLICY_BUNDLE_V2_CLOUD_EXCEPTIONS_CAPABILITY = "policy-bundle-v2-cloud-exceptions.v1"
 # Re-exported for the supply-chain services; the resident derives the endpoint.
 _normalized_receipts_sync_url = _sync.normalized_receipts_sync_url
 
@@ -275,6 +282,9 @@ def _policy_bundle_is_version_downgrade(
         expected_hash = (
             expected_last_good_bundle.get("bundleHash") if isinstance(expected_last_good_bundle, dict) else None
         )
+        current_exceptions_issued_at = (
+            existing_bundle.get("cloudExceptionsIssuedAt") if isinstance(existing_bundle, dict) else None
+        )
         transition_error = validate_policy_bundle_v2_transition(
             next_bundle,
             current_bundle_version=(
@@ -287,6 +297,12 @@ def _policy_bundle_is_version_downgrade(
                 else None
             ),
             expected_last_good_bundle_hash=(expected_hash if isinstance(expected_hash, str) else None),
+            current_cloud_exceptions_issued_at=(
+                current_exceptions_issued_at if isinstance(current_exceptions_issued_at, str) else None
+            ),
+            current_cloud_exceptions_hash=(
+                policy_bundle_cloud_exceptions_hash(existing_bundle) if isinstance(existing_bundle, dict) else None
+            ),
         )
         if transition_error == NATIVE_UNAVAILABLE_REJECTION:
             # The resident could not decide. That is an outage, never a
@@ -367,16 +383,25 @@ def _build_canonical_policy_bundle_decisions(
     ]
 
 
+def _policy_bundle_is_evaluating(policy_bundle: dict[str, object]) -> bool:
+    """Whether the bundle rolls its rules out to watch them, not to enforce them."""
+
+    payload = policy_bundle.get("payload")
+    spec = payload.get("spec") if isinstance(payload, dict) else None
+    defaults = spec.get("defaults") if isinstance(spec, dict) else None
+    return isinstance(defaults, dict) and defaults.get("mode") == "observe"
+
+
 def _build_policy_bundle_decisions(
     policy_bundle: dict[str, object],
     *,
     device_id: str,
     device_name: str,
-    canonical_enforcement: bool = False,
 ) -> list[PolicyDecision]:
+    # Cloud sends a v2 bundle only when v1 cannot carry the policy, so every
+    # device enforces its compiled rules. The rollout flag only decides whether
+    # a v2 bundle that disagrees with the legacy shadow is refused.
     if policy_bundle.get("contractVersion") == POLICY_BUNDLE_V2_CONTRACT:
-        if not canonical_enforcement:
-            return []
         return _build_canonical_policy_bundle_decisions(
             policy_bundle,
             device_id=device_id,
@@ -387,6 +412,112 @@ def _build_policy_bundle_decisions(
         device_id=device_id,
         device_name=device_name,
     )
+
+
+def policy_bundle_candidate_decisions(
+    store: GuardStore,
+    policy_bundle: dict[str, object],
+    *,
+    is_v2: bool,
+    device_id: str,
+    device_name: str,
+    canonical_enforcement: bool,
+    existing_policy_bundle: object,
+    now: str,
+) -> tuple[list[PolicyDecision], str | None, str | None]:
+    """The decisions a verified bundle activates, or the reason it is refused.
+
+    Both sync routes answer this the same way: the CLI's ``sync_receipts`` and
+    the daemon's headless policy sync. A v2 bundle compiles to canonical
+    decisions and is then held against the legacy shadow, so a device that
+    cannot prove the two agree keeps the policy it already has. A bundle that
+    fails to compile is reported here rather than raised at the caller, which
+    on the daemon route would otherwise drop the request without a response.
+    """
+
+    try:
+        if not is_v2:
+            return (
+                _build_policy_bundle_decisions(
+                    policy_bundle,
+                    device_id=device_id,
+                    device_name=device_name,
+                ),
+                None,
+                None,
+            )
+        canonical_decisions = _build_canonical_policy_bundle_decisions(
+            policy_bundle,
+            device_id=device_id,
+            device_name=device_name,
+        )
+    except PolicyCompilationError as error:
+        rule_id = None if error.code in CANONICAL_COMPILE_DOCUMENT_CODES else error.rule_id
+        return [], f"{CANONICAL_COMPILE_REJECTION_PREFIX}{error.code}", rule_id
+    except PolicyBundleNativeError as error:
+        return [], native_rejection_code(error), None
+
+    legacy_payload = store.get_sync_payload("policy_bundle_legacy_last_good")
+    if not isinstance(legacy_payload, dict):
+        legacy_payload = (
+            existing_policy_bundle
+            if isinstance(existing_policy_bundle, dict)
+            and existing_policy_bundle.get("contractVersion") != POLICY_BUNDLE_V2_CONTRACT
+            else None
+        )
+    try:
+        legacy_decisions = (
+            _build_policy_bundle_decisions(
+                legacy_payload,
+                device_id=device_id,
+                device_name=device_name,
+            )
+            if isinstance(legacy_payload, dict)
+            else []
+        )
+    except PolicyCompilationError:
+        # The stored legacy bundle is the shadow, not the candidate. One that no
+        # longer compiles cannot show agreement, so it stands in as unavailable
+        # rather than refusing a candidate that is itself well formed.
+        legacy_decisions = []
+    except PolicyBundleNativeError as error:
+        return [], native_rejection_code(error), None
+
+    native_shadow_unavailable = False
+    try:
+        # An Evaluate bundle compiles to no rows on purpose, so an older
+        # bundle's rows say nothing about its drift.
+        mismatch_reasons = (
+            ()
+            if _policy_bundle_is_evaluating(policy_bundle)
+            else _authority.policy_shadow_mismatch(
+                legacy_decisions,
+                canonical_decisions,
+            )
+        )
+    except NativeRunnerAuthorityError:
+        # Rust owns the shadow comparison. Without its verdict the candidate
+        # cannot be proven equivalent, so treat it as a blocking mismatch: keep
+        # the existing policy and never activate the new bundle.
+        native_shadow_unavailable = True
+        mismatch_reasons = ("native_shadow_unavailable",)
+    blocking_mismatch_reasons = tuple(reason for reason in mismatch_reasons if reason != "legacy_unavailable")
+    if mismatch_reasons:
+        store.add_event(
+            "policy_bundle/shadow_mismatch",
+            {
+                "canonicalRows": len(canonical_decisions),
+                "legacyRows": len(legacy_decisions),
+                "reasonCodes": list(mismatch_reasons),
+                "status": "mismatch",
+            },
+            now,
+        )
+    if native_shadow_unavailable:
+        return canonical_decisions, "native_shadow_unavailable", None
+    if canonical_enforcement and blocking_mismatch_reasons:
+        return canonical_decisions, "canonical_shadow_mismatch", None
+    return canonical_decisions, None, None
 
 
 def sync_receipts(
@@ -713,83 +844,24 @@ def sync_receipts(
         if managed_controls_error is not None:
             policy_bundle_rejection_reason = managed_controls_error
         if validated_policy_bundle is not None:
-            try:
-                if validated_bundle_is_v2:
-                    canonical_decisions = _build_canonical_policy_bundle_decisions(
-                        validated_policy_bundle,
-                        device_id=device_id,
-                        device_name=device_name,
-                    )
-                    legacy_payload = store.get_sync_payload("policy_bundle_legacy_last_good")
-                    if not isinstance(legacy_payload, dict):
-                        legacy_payload = (
-                            existing_policy_bundle
-                            if isinstance(existing_policy_bundle, dict)
-                            and existing_policy_bundle.get("contractVersion") != POLICY_BUNDLE_V2_CONTRACT
-                            else None
-                        )
-                    legacy_decisions = (
-                        _build_policy_bundle_decisions(
-                            legacy_payload,
-                            device_id=device_id,
-                            device_name=device_name,
-                        )
-                        if isinstance(legacy_payload, dict)
-                        else []
-                    )
-                    native_shadow_unavailable = False
-                    try:
-                        mismatch_reasons = _authority.policy_shadow_mismatch(
-                            legacy_decisions,
-                            canonical_decisions,
-                        )
-                    except NativeRunnerAuthorityError:
-                        # Rust owns the shadow comparison. Without its verdict
-                        # the candidate cannot be proven equivalent, so treat it
-                        # as a blocking mismatch: keep the existing policy and
-                        # never activate the new bundle.
-                        native_shadow_unavailable = True
-                        mismatch_reasons = ("native_shadow_unavailable",)
-                    blocking_mismatch_reasons = tuple(
-                        reason for reason in mismatch_reasons if reason != "legacy_unavailable"
-                    )
-                    candidate_policy_decisions = (
-                        canonical_decisions
-                        if canonical_enforcement and not blocking_mismatch_reasons
-                        else legacy_decisions
-                    )
-                    if mismatch_reasons:
-                        store.add_event(
-                            "policy_bundle/shadow_mismatch",
-                            {
-                                "canonicalRows": len(canonical_decisions),
-                                "legacyRows": len(legacy_decisions),
-                                "reasonCodes": list(mismatch_reasons),
-                                "status": "mismatch",
-                            },
-                            now,
-                        )
-                    if native_shadow_unavailable:
-                        validated_policy_bundle = None
-                        policy_bundle_rejection_reason = "native_shadow_unavailable"
-                    elif canonical_enforcement and blocking_mismatch_reasons:
-                        validated_policy_bundle = None
-                        policy_bundle_rejection_reason = "canonical_shadow_mismatch"
-                else:
-                    candidate_policy_decisions = _build_policy_bundle_decisions(
-                        validated_policy_bundle,
-                        device_id=device_id,
-                        device_name=device_name,
-                    )
-            except PolicyCompilationError as error:
+            (
+                candidate_policy_decisions,
+                candidate_rejection_reason,
+                candidate_rejection_rule_id,
+            ) = policy_bundle_candidate_decisions(
+                store,
+                validated_policy_bundle,
+                is_v2=validated_bundle_is_v2,
+                device_id=device_id,
+                device_name=device_name,
+                canonical_enforcement=canonical_enforcement,
+                existing_policy_bundle=existing_policy_bundle,
+                now=now,
+            )
+            if candidate_rejection_reason is not None:
                 validated_policy_bundle = None
-                policy_bundle_rejection_reason = f"{CANONICAL_COMPILE_REJECTION_PREFIX}{error.code}"
-                if error.code not in CANONICAL_COMPILE_DOCUMENT_CODES:
-                    policy_bundle_rejection_rule_id = error.rule_id
-            except PolicyBundleNativeError as error:
-                candidate_policy_decisions = []
-                validated_policy_bundle = None
-                policy_bundle_rejection_reason = native_rejection_code(error)
+                policy_bundle_rejection_reason = candidate_rejection_reason
+                policy_bundle_rejection_rule_id = candidate_rejection_rule_id
         if validated_policy_bundle is not None:
             effective_policy_bundle = validated_policy_bundle
             update_last_good = True
@@ -924,7 +996,6 @@ def sync_receipts(
                     effective_policy_bundle,
                     device_id=device_id,
                     device_name=device_name,
-                    canonical_enforcement=canonical_enforcement,
                 )
             )
             policy_bundle_ack = effective_policy_bundle_acknowledgement(
@@ -1834,6 +1905,16 @@ def _local_guard_runtime_session(
     device_id: str = "local-machine",
     workspace_id: str | None = None,
 ) -> dict[str, object]:
+    capabilities = [
+        "approval-center",
+        "guard-cloud-sync",
+        "local-daemon",
+        FLEET_POSTURE_CAPABILITY,
+        POLICY_BUNDLE_V2_CLOUD_EXCEPTIONS_CAPABILITY,
+        # Exact command rules reach the hook through canonical decisions,
+        # which every device activates from a verified v2 bundle.
+        POLICY_EXACT_COMMAND_RULES_CAPABILITY,
+    ]
     session: dict[str, object] = {
         "harness": "hol-guard",
         "surface": "cli",
@@ -1842,7 +1923,7 @@ def _local_guard_runtime_session(
         "client_title": "HOL Guard CLI",
         "client_version": __version__,
         "workspace": "local-machine",
-        "capabilities": ["approval-center", "guard-cloud-sync", "local-daemon", FLEET_POSTURE_CAPABILITY],
+        "capabilities": capabilities,
         "policy_document_versions": list(_POLICY_DOCUMENT_VERSIONS),
         "policy_bundle_versions": list(_POLICY_BUNDLE_VERSIONS),
         "policy_contracts": list(_POLICY_CONTRACTS),

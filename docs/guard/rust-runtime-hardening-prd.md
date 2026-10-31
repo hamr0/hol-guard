@@ -1,6 +1,6 @@
 # HOL Guard native runtime hardening PRD
 
-Status: accepted follow-up, tracked on `main`. Reconciled 2026-10-29 against `main` at `6a319266c3`, with 3.58.0 shipped and 3.59.0 open in its release PR. The program was planned on a `release/3.0` branch and did not land that way: the work merged to `main` through ordinary PRs, and `release/3.0` is now historical.
+Status: accepted follow-up, tracked on `main`. Reconciled 2026-10-30 against `main` at `755022afa0`, with 3.58.0 shipped and 3.59.0 open in its release PR. The program was planned on a `release/3.0` branch and did not land that way: the work merged to `main` through ordinary PRs, and `release/3.0` is now historical.
 
 ## Objective
 
@@ -45,7 +45,7 @@ During Python daemon failure:
 ## Target architecture
 
 - **Harness adapters:** authenticate the daemon and enforce daemon-unavailable fail-safe behavior.
-- **Python daemon:** policy, approvals, receipts, containment, durable correlation, health orchestration, and explicit differential-test oracle support.
+- **Python daemon:** policy, approvals, receipts, durable correlation, health orchestration, and explicit differential-test oracle support. Containment has left this list: the route that decides a contained run, the sandbox argv it launches and the copy back are `guard-runtime`'s `hook_decision_containment_route.rs` and `contained_workspace_sink_launch.rs`, and `runtime/restricted_workspace.py`'s overlay is now only the fallback for the shapes the native shape refuses.
 - **Rust resident runtime:** bounded parsing, output traversal, secret and prompt-injection fast paths, secure source reads, hashing, effect extraction, and eligible decisions.
 - **Native supervisor:** child identity, health, prewarm, restart, rotation, circuit breaking, and fallback budgeting.
 - **Authenticated policy snapshot:** immutable, versioned native inputs bound to package/rule/policy identity.

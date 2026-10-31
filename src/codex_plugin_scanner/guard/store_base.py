@@ -72,15 +72,6 @@ from .store_approvals import (
     approval_schema_statement,
     backfill_approval_queue_columns,
 )
-from .store_approvals import (
-    get_approval_request as load_approval_request,
-)
-from .store_approvals import (
-    list_approval_requests as load_approval_requests,
-)
-from .store_approvals import (
-    resolve_request_with_queue_result as persist_queue_resolution,
-)
 from .store_connect import (
     connect_request_schema_statement,
     connect_state_schema_statement,
@@ -100,19 +91,7 @@ from .store_resume import (
     delete_request_resumes as purge_request_resumes,
 )
 from .store_resume import (
-    get_latest_request_resume as load_latest_request_resume,
-)
-from .store_resume import (
-    get_request_resume as load_request_resume,
-)
-from .store_resume import (
     resume_schema_statement,
-)
-from .store_resume import (
-    seed_request_resume as persist_request_resume_seed,
-)
-from .store_resume import (
-    update_request_resume as persist_request_resume_update,
 )
 from .store_supply_chain import (
     get_supply_chain_bundle as load_supply_chain_bundle,

@@ -65,6 +65,14 @@ fn read_only_loops_match_their_unrolled_form() {
             "for spec in \"1 aaaa\" \"2 bbbb\"; do echo \"$spec\"; done",
             "echo \"1 aaaa\"; echo \"2 bbbb\"",
         ),
+        // A `!` in front of a body item only inverts the exit status that
+        // item reports. The `;` after it runs the next item either way, so
+        // the written-out list runs the same work without it.
+        ("for f in a b; do ! wc -l $f; done", "wc -l a; wc -l b"),
+        (
+            "for f in a b; do echo $f; ! wc -l $f; done",
+            "echo a; wc -l a; echo b; wc -l b",
+        ),
         (
             "for flag in \"-l one\" \"-l two\"; do echo \"$flag\"; done",
             "echo \"-l one\"; echo \"-l two\"",
@@ -323,4 +331,109 @@ fn environment_and_shell_special_loop_variables_are_not_unrolled() {
         super::for_loop_unroll::unroll("for file_1 in a b; do echo \"$file_1\"; done").as_deref(),
         Some("echo \"a\"; echo \"b\"")
     );
+}
+
+/// A subshell group is a command list of its own, so the body grammar reads
+/// it as one and the written-out text keeps the parentheses around the same
+/// work. `(cd "$p" && npm test)` is how a loop runs a step in each package
+/// without leaving the shell in the last one.
+#[test]
+fn a_subshell_group_in_the_body_keeps_its_parentheses() {
+    for (looped, unrolled) in [
+        (
+            "for p in packages/core packages/web; do (cd \"$p\" && npm test); done",
+            "(cd \"packages/core\" && npm test); (cd \"packages/web\" && npm test)",
+        ),
+        (
+            "for p in a b; do (cd \"$p\"; ls); done",
+            "(cd \"a\"; ls); (cd \"b\"; ls)",
+        ),
+        (
+            "for p in a b; do echo \"$p\"; (cd \"$p\" && ls); done",
+            "echo \"a\"; (cd \"a\" && ls); echo \"b\"; (cd \"b\" && ls)",
+        ),
+        (
+            "for p in a b; do ( cd \"$p\" && ls ); done",
+            "(cd \"a\" && ls); (cd \"b\" && ls)",
+        ),
+        (
+            "for d in packages/*/; do (cd \"$d\" && npm test); done",
+            "(cd packages/*/ && npm test)",
+        ),
+    ] {
+        assert_eq!(
+            super::for_loop_unroll::unroll(looped).as_deref(),
+            Some(unrolled),
+            "{looped}"
+        );
+    }
+}
+
+/// What the group grammar still refuses: a list it cannot read, a shape that
+/// only looks like a group, and a parenthesis standing on its own.
+#[test]
+fn a_group_outside_the_command_list_grammar_keeps_its_review() {
+    for command in [
+        // A keyword inside the group is not a plain command word.
+        "for p in a b; do (cd \"$p\" && if true; then ls; fi); done",
+        // Arithmetic, not a subshell inside a subshell.
+        "for p in a b; do (( count++ )); done",
+        // An array literal: `(` here is not in command position.
+        "for p in a b; do seen=(1 2); echo \"$p\"; done",
+        // A group that never closes, and a `)` that opens nothing.
+        "for p in a b; do (cd \"$p\" && ls; done",
+        "for p in a b; do echo )x; done",
+        // A group that runs nothing.
+        "for p in a b; do (); done",
+        // The group backgrounds itself, which the flat list does not say.
+        "for p in a b; do (cd \"$p\" && ls) & done",
+    ] {
+        assert_eq!(super::for_loop_unroll::unroll(command), None, "{command}");
+    }
+}
+
+/// `||` is a list separator between two commands, not a pipeline stage. The
+/// group grammar reads each command beside it, so `(npm test || echo failed)`
+/// — a loop step that reports its own failure and carries on — is written out
+/// like every other list the group holds.
+#[test]
+fn a_group_in_the_body_reads_an_alternative_between_its_commands() {
+    for (looped, unrolled) in [
+        (
+            "for p in a b; do (cd \"$p\" && npm test || echo failed); done",
+            "(cd \"a\" && npm test || echo failed); (cd \"b\" && npm test || echo failed)",
+        ),
+        (
+            "for p in a b; do (echo \"$p\" || ls); done",
+            "(echo \"a\" || ls); (echo \"b\" || ls)",
+        ),
+        (
+            "for p in a b; do (cat \"$p\" | sort || echo empty); done",
+            "(cat \"a\" | sort || echo empty); (cat \"b\" | sort || echo empty)",
+        ),
+    ] {
+        assert_eq!(
+            super::for_loop_unroll::unroll(looped).as_deref(),
+            Some(unrolled),
+            "{looped}"
+        );
+    }
+}
+
+/// A pipeline that starts or ends on `|` is not that alternative, and keeps
+/// its review with every other shape the grammar cannot read.
+#[test]
+fn a_group_opening_or_closing_on_a_pipe_keeps_its_review() {
+    for command in [
+        "for p in a b; do (| echo \"$p\"); done",
+        "for p in a b; do (echo \"$p\" |); done",
+        "for p in a b; do (echo \"$p\" | | ls); done",
+        // `|||` is `||` followed by a pipeline that starts on `|`: a syntax
+        // error, not an alternative, so the two empty runs it leaves must
+        // not both be stepped over.
+        "for p in a b; do (echo \"$p\" ||| ls); done",
+        "for p in a b; do (echo \"$p\" |||| ls); done",
+    ] {
+        assert_eq!(super::for_loop_unroll::unroll(command), None, "{command}");
+    }
 }

@@ -292,7 +292,7 @@ def test_native_review_queue_failure_fails_closed(
     def fail_persist(*_args: object, **_kwargs: object) -> dict[str, object]:
         raise OSError("approval store unavailable")
 
-    monkeypatch.setattr(store, "queue_review_approval_request", fail_persist)
+    monkeypatch.setattr(store, "queue_native_review", fail_persist)
     response = worker.review_http_payload(
         payload={"hook_event_name": "PreToolUse", "tool_input": {"url": "https://example.test"}},
         params={},

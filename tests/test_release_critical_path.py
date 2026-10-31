@@ -139,7 +139,7 @@ def test_publication_wait_retries_network_errors_but_rejects_failed_publication(
         monkeypatch.setenv(key, value)
     calls = []
 
-    def ready(*args):
+    def ready(*args, **kwargs):
         calls.append(args)
         if len(calls) == 1:
             raise error
@@ -306,12 +306,12 @@ def test_feed_discovery_skips_unfinished_and_ambiguous_releases(tmp_path):
 
 def test_compilation_and_signing_run_beside_packaging_and_registry_verification():
     jobs = load_workflow(ROOT / ".github/workflows/publish.yml")["jobs"]
-    resolvers = ["authorize-release", "resolve-alpha-version", "resolve-canary-version"]
+    resolvers = ["authorize-release", "authorize-pull-request-alpha", "resolve-alpha-version", "resolve-canary-version"]
     assert jobs["precompile-native-linux-x64"]["needs"] == resolvers
-    assert jobs["resolve-alpha-version"]["needs"] == "authorize-release"
+    assert jobs["resolve-alpha-version"]["needs"] == ["authorize-release", "authorize-pull-request-alpha"]
     # Build + Verify adopts the resolved alpha or canary version so it can never differ
     # from the binaries.
-    assert jobs["build"]["needs"] == [resolvers[0], "require-supply-chain-audit", *resolvers[1:]]
+    assert jobs["build"]["needs"] == [resolvers[0], resolvers[1], "require-supply-chain-audit", *resolvers[2:]]
     assert "needs.authorize-release.result == 'success'" in jobs["build"]["if"]
     assert "needs.require-supply-chain-audit.result == 'success'" in jobs["build"]["if"]
     assert "!cancelled()" in jobs["build"]["if"]

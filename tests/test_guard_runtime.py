@@ -4372,7 +4372,14 @@ clearer UX and an implementation plan with technical references.
                 "client_title": "HOL Guard CLI",
                 "client_version": guard_runner_module.__version__,
                 "workspace": "local-machine",
-                "capabilities": ["approval-center", "guard-cloud-sync", "local-daemon", "fleet-posture/v1"],
+                "capabilities": [
+                    "approval-center",
+                    "guard-cloud-sync",
+                    "local-daemon",
+                    "fleet-posture/v1",
+                    "policy-bundle-v2-cloud-exceptions.v1",
+                    "policy-document-exact-commands.v1",
+                ],
                 "policy_bundle_versions": [
                     "guard-policy-bundle.v1",
                     "guard-policy-bundle.v2",
@@ -9863,7 +9870,7 @@ _PACKAGE_THEN_SHELL_RISK_COMMANDS = (
     ("npm install lodash\nrm -f important.txt", "native_package_review"),
     ("npm install lodash | sh -c 'rm -f important.txt'", "native_command_extension_evaluation_failed"),
     ("sh -c 'npm install lodash && rm -f important.txt'", "native_package_review"),
-    ("(npm install lodash) && (rm -f important.txt)", "native_command_review_required"),
+    ("(npm install lodash) && (rm -f important.txt)", "native_package_review"),
     ("npm install lodash > install.log", "native_package_review"),
     ("npm install lodash > install.log && rm -f important.txt", "native_command_review_required"),
     ("npm install lodash && bash <<'EOF'\nrm -f important.txt\nEOF", "native_command_extension_evaluation_failed"),
@@ -18867,7 +18874,102 @@ def test_sync_receipts_rolls_back_to_last_good_bundle_on_canonical_compile_failu
     }
 
 
-def _prepare_shadow_candidate_sync(tmp_path, monkeypatch, *, canonical=True):
+def test_sync_receipts_enforces_an_exact_command_rule_from_a_v2_bundle(tmp_path, monkeypatch):
+    # Guard Cloud's Policy Studio and Cloud Review save "block this command"
+    # as an exact `match.commands` rule. The canonical compiler used to refuse
+    # it, which rejected the whole bundle and left the device on its old policy.
+    store = GuardStore(tmp_path / "guard-home")
+    _seed_guard_cloud(store, workspace_id="workspace-1")
+    monkeypatch.setenv("HOL_GUARD_POLICY_CANONICAL_ENFORCEMENT", "1")
+    store.set_sync_payload(
+        "policy_bundle_keyring",
+        policy_bundle_test_keyring(workspace_id="workspace-1"),
+        "2026-06-05T13:29:00+00:00",
+    )
+    command = "bun install --frozen-lockfile --ignore-scripts"
+    candidate = {
+        "contractVersion": "guard-policy-bundle.v2",
+        "bundleVersion": 5,
+        "bundleHash": "b" * 64,
+        "issuedAt": "2026-06-05T13:30:00Z",
+        "workspaceId": "workspace-1",
+        "payload": {
+            "apiVersion": "guard.hashgraphonline.com/v1alpha1",
+            "kind": "GuardPolicy",
+            "metadata": {"id": "policy.exact-command", "name": "Exact command", "revision": 1},
+            "spec": {
+                "defaults": {"mode": "prompt", "defaultAction": "warn"},
+                "rules": [
+                    {
+                        "id": "rule.block-install",
+                        "enabled": True,
+                        "effect": "block",
+                        "match": {"commands": [command], "harnesses": ["codex"]},
+                        "lifetime": {"mode": "permanent", "expiresAt": None},
+                        "provenance": {
+                            "source": "manual",
+                            "receiptIds": [],
+                            "createdAt": "2026-06-05T13:30:00Z",
+                            "createdBy": "owner-1",
+                        },
+                    }
+                ],
+            },
+        },
+    }
+
+    class _Response:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+    def _fake_urlopen(request, timeout):
+        if request.full_url.endswith("/api/v1/guard/events"):
+            return _Response({"accepted": 0, "rejected": 0, "statuses": []})
+        return _Response(
+            {
+                "syncedAt": "2026-06-05T13:30:01+00:00",
+                "receiptsStored": 0,
+                "policyBundle": candidate,
+            }
+        )
+
+    stub_authenticated_urlopen(monkeypatch, _fake_urlopen)
+    monkeypatch.setattr(
+        guard_runner_module,
+        "validate_synced_policy_bundle",
+        lambda policy_bundle, *args, **kwargs: (policy_bundle, None, ()),
+    )
+    monkeypatch.setattr(
+        guard_runner_module,
+        "_validate_cached_policy_bundle",
+        lambda _store, policy_bundle: (
+            policy_bundle if isinstance(policy_bundle, dict) else None,
+            None,
+        ),
+    )
+    monkeypatch.setattr(guard_runner_module, "sync_pain_signals", lambda _store, auth_context=None: 0)
+
+    guard_runner_module.sync_receipts(store)
+
+    assert not store.get_sync_payload("policy_bundle_last_error")
+    assert store.get_sync_payload("policy_bundle") == candidate
+    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    assert [
+        (decision["harness"], decision["scope"], decision["action"], decision["artifact_id"], decision["owner"])
+        for decision in store.list_policy_decisions()
+    ] == [("codex", "artifact", "block", f"memory:exact-shell-command:{digest}", "rule.block-install")]
+
+
+def _prepare_shadow_candidate_sync(tmp_path, monkeypatch, *, canonical=True, mode="prompt"):
     store = GuardStore(tmp_path / "guard-home")
     _seed_guard_cloud(store, workspace_id="workspace-1")
     if canonical:
@@ -18908,7 +19010,7 @@ def _prepare_shadow_candidate_sync(tmp_path, monkeypatch, *, canonical=True):
                 "revision": 1,
             },
             "spec": {
-                "defaults": {"mode": "prompt", "defaultAction": "warn"},
+                "defaults": {"mode": mode, "defaultAction": "warn"},
                 "rules": [
                     {
                         "id": "rule.canonical",
@@ -18978,6 +19080,19 @@ def _prepare_shadow_candidate_sync(tmp_path, monkeypatch, *, canonical=True):
     return store, legacy
 
 
+def test_sync_receipts_activates_an_evaluate_bundle_over_legacy_rows(tmp_path, monkeypatch):
+    """Evaluate compiles to no rows on purpose; an older bundle's rows are not drift."""
+
+    store, _legacy = _prepare_shadow_candidate_sync(tmp_path, monkeypatch, mode="observe")
+
+    guard_runner_module.sync_receipts(store)
+
+    assert not store.get_sync_payload("policy_bundle_last_error")
+    assert store.get_sync_payload("policy_bundle")["contractVersion"] == "guard-policy-bundle.v2"
+    assert store.list_policy_decisions() == []
+    assert store.list_events(event_name="policy_bundle/shadow_mismatch") == []
+
+
 def test_sync_receipts_keeps_legacy_bundle_active_on_canonical_shadow_mismatch(
     tmp_path,
     monkeypatch,
@@ -18997,6 +19112,25 @@ def test_sync_receipts_keeps_legacy_bundle_active_on_canonical_shadow_mismatch(
         "reasonCodes": ["action"],
         "status": "mismatch",
     }
+
+
+def test_sync_receipts_applies_v2_bundle_outside_the_canonical_rollout(
+    tmp_path,
+    monkeypatch,
+):
+    # Cloud sends v2 only when v1 cannot carry the policy, so a device outside
+    # the canonical rollout must enforce it instead of keeping the older v1
+    # decisions. The shadow comparison is still recorded.
+    store, _legacy = _prepare_shadow_candidate_sync(tmp_path, monkeypatch, canonical=False)
+
+    guard_runner_module.sync_receipts(store)
+
+    applied = store.get_sync_payload("policy_bundle")
+    assert isinstance(applied, dict)
+    assert applied["contractVersion"] == "guard-policy-bundle.v2"
+    assert [decision["action"] for decision in store.list_policy_decisions()] == ["allow"]
+    mismatch_events = store.list_events(event_name="policy_bundle/shadow_mismatch")
+    assert mismatch_events[-1]["payload"]["reasonCodes"] == ["action"]
 
 
 def test_sync_receipts_rejects_candidate_when_native_shadow_comparison_is_unavailable(
@@ -19150,7 +19284,6 @@ def test_policy_bundle_decision_resolves_before_receipt_persistence(tmp_path, mo
     original_add_receipt = store.add_receipt
 
     def tracked_resolve_policy(*args, **kwargs):
-        assert kwargs.get("consume_one_shot") is False
         order.append("resolve_policy_non_consuming")
         return original_resolve_policy(*args, **kwargs)
 

@@ -407,3 +407,88 @@ fn a_resident_that_never_answers_the_handshake_does_not_spend_the_request_budget
     assert_eq!(result.unwrap_err(), "native_policy_verifier_key_missing");
     assert!(waited < Duration::from_secs(4), "waited {waited:?}");
 }
+
+/// A child for [`a_killed_resident_leaves_no_identity_to_match`] to kill.
+///
+/// It is started by name through the test binary, so the case below needs no
+/// program on `PATH`. The wait is only an upper bound on how long it survives
+/// a parent that never gets to kill it.
+#[cfg(unix)]
+#[test]
+#[ignore = "started as a child by a_killed_resident_leaves_no_identity_to_match"]
+fn waits_for_the_parent_that_started_it() {
+    std::thread::sleep(Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_killed_resident_leaves_no_identity_to_match() {
+    // The child is this test binary running the ignored case above. A program
+    // from `PATH` would make a runner without it fail at `spawn`, before any
+    // of the identity assertions below ran.
+    let mut child =
+        std::process::Command::new(std::env::current_exe().expect("the test binary names itself"))
+            .args(["waits_for_the_parent_that_started_it", "--ignored"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the test binary could not be started");
+    let process_id = child.id();
+    let marker = crate::resident_state::process_start_marker(process_id)
+        .expect("a live process has a start marker");
+    assert_eq!(
+        crate::resident_state::validate_process_start_marker(process_id, &marker),
+        Ok(())
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // A reaped pid is free at once. Either it names nothing, or it names a
+    // process that did not start when the resident did; both refuse, and
+    // neither may be mistaken for the resident that was killed.
+    let error = crate::resident_state::validate_process_start_marker(process_id, &marker)
+        .expect_err("a killed resident still matched its recorded identity");
+    assert!(
+        error == "native_resident_process_identity_mismatch"
+            || error == "native_resident_process_identity_unavailable",
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scope_that_cannot_be_written_publishes_no_state() {
+    use std::fs;
+    use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
+
+    let (home, base) = owner_release_fixture("read-only-scope");
+    let digest = runtime_digest().unwrap();
+    let scope = state_scope(&base, &digest).unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    fs::set_permissions(&scope, fs::Permissions::from_mode(0o500)).unwrap();
+    // A superuser ignores the directory mode, so the mode proves nothing there.
+    let probe = scope.join("writable-probe");
+    let writable = fs::File::create(&probe).is_ok();
+    if writable {
+        fs::remove_file(&probe).unwrap();
+    }
+    let result = crate::resident_state::publish_state(
+        &scope,
+        1,
+        std::process::id(),
+        &digest,
+        "loopback",
+        endpoint,
+        &[13; crate::AUTH_TOKEN_BYTES],
+    );
+    fs::set_permissions(&scope, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_dir_all(&home).unwrap();
+    if writable {
+        return;
+    }
+    assert_eq!(
+        result.map(|_| ()),
+        Err("native_resident_state_write_failed".to_owned())
+    );
+}

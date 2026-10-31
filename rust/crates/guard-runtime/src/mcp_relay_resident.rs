@@ -42,6 +42,7 @@ use crate::mcp_relay_authority::{
 };
 use crate::mcp_relay_catalog::{CatalogSnapshot, RelayCatalog};
 use crate::mcp_relay_decide::inline::Reply as InlineReply;
+use crate::mcp_relay_lane::RETRY_BUDGET;
 use crate::mcp_relay_launch::Launch;
 use crate::mcp_relay_package_eval::{evaluate_package_request, PackageEvalFacts};
 use crate::mcp_relay_pending::COMMIT_RESULT_SCHEMA;
@@ -406,8 +407,14 @@ impl RelayAuthority for ResidentRelayAuthority {
         let guard_home = PathBuf::from(&facts.guard_home);
         self.warm_up();
         let mut output = self.exchange(&guard_home, &payload);
-        if reply_of(output.as_deref()).is_none() && self.rekick(output.as_deref()) {
-            output = self.exchange(&guard_home, &payload);
+        // Retries share one budget: each is bounded by it, and none starts
+        // without the time a resident needs to answer.
+        let retry_until = Instant::now() + RETRY_BUDGET;
+        while reply_of(output.as_deref()).is_none()
+            && self.rekick(output.as_deref(), retry_until)
+            && remaining(retry_until) >= MINIMUM_TIMEOUT
+        {
+            output = self.exchange_until(&guard_home, &payload, retry_until);
         }
         // A package call is decided from an evaluation whose archive and
         // registry rounds this relay performs, which the decide round trip

@@ -49,10 +49,8 @@ dependencies = [
     "sigstore>=4.5,<5",
     "keyring>=25.0",
     "packaging>=24.0",
-    "idna==3.15",
     "jsonschema>=4.26.0",
     "pyyaml>=6.0.3",
-    "regex>=2025.0.0,<2027",
     "requests>=2.32,<3",
     "tomli>=2.0; python_version < '3.11'",
     "typing_extensions>=4.15.0",
@@ -82,6 +80,7 @@ publish = [
 [dependency-groups]
 ci-test = [
     "build>=1.5.0",
+    "idna==3.15",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
@@ -222,7 +221,6 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "tests/fixtures/mcp-canary-server.py" = ["N999"]
 "scripts/codex-auto-resume-smoke.py" = ["N999"]
-"scripts/e2e-cursor-hook-smoke.py" = ["N999"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -241,6 +239,7 @@ markers = [
   "integration: verifies multiple Guard subsystems together",
   "native_codex_hook_bridge: installs Codex hooks through the native runtime bridge when it is available",
   "native_bounded_hook_bridge: installs bounded CLI hooks through the native runtime bridge when it is available",
+  "native_mcp_relay: installs Guard-managed MCP proxies through the native relay when it is available",
   "native_pi_hook_bridge: generates Pi and Oh My Pi extensions that use the native runtime hook bridge when it is available",
   "parser: verifies parsing or normalization security semantics",
   "policy: verifies policy composition or enforcement semantics",

@@ -16,6 +16,7 @@ use guard_policy_snapshot::local_authority_integrity::{
 };
 
 pub const LOCAL_ONCE_INTEGRITY_PURPOSE: &str = "guard-local-once-approval";
+pub const LOCAL_ONCE_LEGACY_AUTHORITY_KIND: &str = "legacy";
 pub const EXACT_CLOUD_AUTHORITY_KIND: &str = "exact-cloud";
 pub const EXACT_CLOUD_INTEGRITY_PURPOSE: &str = "guard-exact-cloud-local-once-v1";
 
@@ -83,7 +84,7 @@ fn local_once_approval_integrity(row: &Value) -> Value {
 }
 
 /// `_verify_local_once_approval` (:411-424).
-fn verify_local_once_approval<'a>(
+pub(crate) fn verify_local_once_approval<'a>(
     row: &Value,
     key: Option<&'a [u8]>,
     key_id: Option<&'a str>,
@@ -124,7 +125,7 @@ fn local_once_approval_integrity_failure(
 
 /// `_local_once_approval_payload` (:443-467) — the decision dict surfaced to
 /// callers.
-fn local_once_approval_payload(row: &Value) -> Value {
+pub(crate) fn local_once_approval_payload(row: &Value) -> Value {
     serde_json::json!({
         "action": row_value(row, "action"),
         "approval_id": row_value(row, "approval_id"),

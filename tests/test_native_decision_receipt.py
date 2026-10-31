@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,7 @@ from codex_plugin_scanner.guard.native_decision_receipt import (
     receipt_matches_edge,
     validate_native_decision_receipt,
 )
-from codex_plugin_scanner.guard.native_hook_adapter import native_review_request
+from codex_plugin_scanner.guard.native_hook_adapter import native_review_query
 from codex_plugin_scanner.guard.runtime.actions import (
     GuardActionEnvelope,
     normalize_harness_payload,
@@ -160,7 +162,7 @@ def _review_envelope(payload: dict[str, object], receipt: dict[str, object], wor
     review = {
         "result": {"decision": "review", "reason": "Review this command."},
         "native_receipt": receipt,
-        "request_id": "request-1",
+        "request_id": uuid.uuid4().hex,
         "approval_center_url": "http://127.0.0.1:4781/approvals",
         "guard_home": str(workspace),
         "review_binding": None,
@@ -169,8 +171,12 @@ def _review_envelope(payload: dict[str, object], receipt: dict[str, object], wor
         "queue_group_id": None,
         "bound_bash": None,
     }
-    request = native_review_request("cursor", payload, review, workspace=workspace, home_dir=workspace)
-    envelope = request["action_envelope_json"]
+    query = native_review_query("cursor", payload, review, workspace=workspace, home_dir=workspace)
+    # Each review queues in its own home so no earlier pending row answers for it.
+    store = GuardStore(workspace / uuid.uuid4().hex)
+    row = store.queue_native_review(query, datetime.now(tz=timezone.utc).isoformat())
+    assert row is not None
+    envelope = row["action_envelope_json"]
     assert isinstance(envelope, dict)
     return envelope
 

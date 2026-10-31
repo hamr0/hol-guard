@@ -33,6 +33,22 @@
 //! queue snapshot also applies a due Watch-posture revert, which only moves a
 //! posture back to protected and never weakens one.
 //!
+//! The launcher's parser reads `--json` and `--timeout` wherever they appear,
+//! so these shapes are matched the same way the other readers here are: the
+//! flags are lifted out before the subcommand path is compared. Writing
+//! `approvals wait <id> --json --timeout 300` asks for exactly the read that
+//! `approvals wait <id> --timeout 300 --json` performs, and an admission that
+//! turned on their order would pause the second spelling of a command it had
+//! already proved read-only.
+//!
+//! `hol-guard explain <target>` is admitted with it (`artifact_explanation`).
+//! It prints what Guard already knows about one inventory artifact, or scans
+//! one local path and reports the scan's own summary: scores, ecosystems,
+//! package names, finding titles and severity counts, never the target's
+//! bytes. It writes nothing to the local store, and the optional
+//! `--cisco-mode` selector only decides whether that scan may add Cisco's
+//! offline evidence.
+//!
 //! `hol-guard runtime` and `hol-guard runtime posture` print the executables
 //! the configured MCP servers would launch and the advisory coverage Guard
 //! already holds for them. Nothing is started, no Cloud call is made and no
@@ -57,11 +73,13 @@ const SHADOW_NAMES: &[&str] = &[
 ];
 
 pub(super) fn safe_hol_guard_segment(
+    basename: &str,
     arguments: &[String],
     cwd: Option<&str>,
     pipeline_index: usize,
 ) -> bool {
     cwd.is_some_and(|cwd| !cwd_shadows_launcher(Path::new(cwd)))
+        && arguments_reach_the_launcher(basename, arguments, cfg!(windows))
         && (safe_hol_guard_arguments(arguments)
             || (pipeline_index == 0
                 && super::pytest_contained::safe_pytest_contained_arguments(arguments, cwd)))
@@ -97,6 +115,38 @@ pub(super) fn names_launcher(text: &str) -> bool {
     })
 }
 
+/// Characters `cmd.exe` acts on when it reads a batch target's arguments a
+/// second time. `&`, `|`, `(`, `)`, `<` and `>` begin a command of their own,
+/// `^` escapes the character after it, `"` ends the quoting the launcher was
+/// spawned with, and `%` and `!` put a variable's value into the line before
+/// any of that is read. A line ending closes the line outright.
+const REPARSED: &[char] = &['"', '&', '|', '<', '>', '^', '%', '!', '(', ')', '\n', '\r'];
+
+/// Whether the arguments reach the launcher as they were written, whatever
+/// program the spelling resolves to.
+///
+/// Windows resolves a word carrying no program suffix through `PATHEXT`, so a
+/// bare `hol-guard`, and an install spelled `~/.hol-guard/bin/hol-guard`, both
+/// reach `hol-guard.cmd` wherever that PATH shim is the launcher the lookup
+/// settles on -- and Guard writes that shim itself. A batch target is handed
+/// to `cmd.exe /c`, which reads the arguments again after the launcher was
+/// spawned with them, so a word holding one of the characters that reading
+/// acts on is not the word the shapes below were proved against. Taking the
+/// `.cmd` spelling out of the admission left that route open under every
+/// spelling the same lookup reaches.
+///
+/// The fixed shapes carry no text of the caller's, so they survive a second
+/// reading unchanged and stay silent on Windows as they are everywhere else.
+/// Only the readers that take free text -- `command test`, `explain`, and the
+/// ids beside them -- keep their review there, and only where the text holds
+/// one of those characters. The explicit `.exe` spelling names a real program,
+/// which is read once.
+fn arguments_reach_the_launcher(basename: &str, arguments: &[String], windows_host: bool) -> bool {
+    !windows_host
+        || basename.ends_with(".exe")
+        || arguments.iter().all(|word| !word.contains(REPARSED))
+}
+
 /// Whether the working directory could supply the program a bare `hol-guard`
 /// reaches. A launcher file sitting in it wins the bare-name lookup, and a
 /// generated shim directory (`package-shims/bin`) is the one place a frozen
@@ -116,6 +166,225 @@ fn cwd_shadows_launcher(cwd: &Path) -> bool {
                 .symlink_metadata()
                 .is_ok_and(|metadata| !metadata.is_dir())
         })
+}
+
+/// A path spelling of an installed Guard program.
+///
+/// An agent waiting on an approval spells the program it was told to run:
+/// the launcher inside the desktop bundle, the one in Guard's own home, the
+/// one in the virtual environment Guard was installed into. A path spelling
+/// drops the read-only admission the bare name gets, so every such wait
+/// raised a second approval row for the row it was already waiting on.
+///
+/// Neither the install path nor its permissions prove what the file is --
+/// every one of those directories is writable by the account the agent runs
+/// as. What bounds them is Guard's own floor: a command that writes a path
+/// [`names_guard_location`](super::guard_names::names_guard_location)
+/// recognises names Guard's installation, which no extension Allow settles,
+/// so a session cannot quietly leave a program of its own at one of these
+/// spellings. That is the same bound the bare name has always rested on, and
+/// it stops at the same place: a write Guard never reviews is outside it.
+///
+/// That bound only holds where a Guard install actually lives, so the
+/// spelling has to name one of those places. `names_guard_location` answers
+/// yes for any Guard program directly under an install-shaped component --
+/// `bin`, `scripts`, `tools`, `lib`, `opt` -- wherever that component sits,
+/// and a checkout carries such components of its own. A repository with its
+/// own `bin/hol-guard` is read by the location screen exactly like the
+/// desktop bundle, and nothing reviews the write that put it there, because
+/// a clone names no Guard location. The spelling is therefore anchored at an
+/// [install root](INSTALL_ROOTS): the desktop bundle, Guard's own home, the
+/// system and package-manager prefixes an install is written to. A path
+/// below the working directory is refused inside that, since an agent
+/// working in a subdirectory of its own checkout would otherwise reach the
+/// checkout's `bin` through a root that happens to contain it.
+///
+/// A relative path is refused before any of this: it resolves against the
+/// working directory, which the agent fills with writes that name no Guard
+/// location at all -- a clone, an unpacked archive, a generated `bin`. That
+/// is why the bare-name proof already refuses a launcher it can see in the
+/// working directory ([`cwd_shadows_launcher`]). A component that names no
+/// directory of its own ([`names_its_own_directory`]) is refused with it: an
+/// install is never spelled by walking back out of somewhere, and the detour
+/// would otherwise reach a file inside the working directory without matching
+/// the prefix that refuses it.
+///
+/// A root that holds one directory per application admits only Guard's own
+/// ([`APPLICATION_ROOTS`]), since every other directory there was written by
+/// a different installer or by whoever unpacked a checkout beside them.
+///
+/// [`safe_hol_guard_arguments`] still decides which subcommands the
+/// admission covers, so the control surface keeps its review.
+pub(super) fn guard_install_executable(executable: &str, context: super::PathContext<'_>) -> bool {
+    // The same spelling the admission arm dispatches on, so a name that could
+    // not reach that arm never pays for the walk below.
+    let basename = super::executable_basename(executable).to_ascii_lowercase();
+    // Only the program suffix Windows gives a real executable. A `.cmd`
+    // target is handed to `cmd.exe /c`, which reads the arguments again after
+    // the launcher was spawned with them, and `command test <text>` carries
+    // text whose whole purpose is to hold the operators that second reading
+    // would act on. Guard does write a `hol-guard.cmd` PATH shim, so this is a
+    // real spelling of the launcher; it keeps the normal review rather than an
+    // admission whose argument screen cannot survive being re-read.
+    let name = basename.strip_suffix(".exe").unwrap_or(&basename);
+    name == "hol-guard"
+        && anchored_at_install_root(executable, context)
+        && super::guard_names::names_guard_location(
+            executable,
+            &super::guard_names::Moved::default(),
+        )
+}
+
+/// Places a Guard install is written to, as prefixes of the spelled path.
+/// An entry starting with `~/` is read against the home directory; the rest
+/// are read against the filesystem root, with a Windows drive letter already
+/// stripped, so `C:/Program Files/...` is matched by `/program files/`.
+///
+/// Every one of these is writable by the account the agent runs as, which is
+/// what the location screen's floor is for. What they rule out is the far
+/// larger set of directories that merely look like an install: a checkout's
+/// own `bin`, an unpacked archive's `tools`, a clone target under `/tmp`.
+const INSTALL_ROOTS: &[&str] = &[
+    "~/.hol-guard/",
+    "~/.local/bin/",
+    "~/.local/pipx/",
+    "~/.local/share/hol-guard/",
+    "~/.local/share/uv/",
+    "~/applications/",
+    "~/appdata/local/hol-guard/",
+    "~/appdata/local/pipx/",
+    "~/appdata/local/programs/",
+    "~/appdata/roaming/",
+    "~/appdata/roaming/python/",
+    "~/appdata/roaming/uv/",
+    "~/library/application support/",
+    "/applications/",
+    "/etc/hol-guard/",
+    "/library/",
+    "/library/application support/",
+    "/opt/",
+    "/opt/homebrew/",
+    "/program files (x86)/",
+    "/program files/",
+    "/programdata/",
+    "/snap/",
+    "/usr/",
+    "/var/lib/hol-guard/",
+];
+
+/// Whether `executable` names a fixed place on the host rather than one the
+/// working directory supplies. `~` is expanded, because the shell expands it
+/// before the lookup; every other spelling is read as written, since this
+/// screen proves where the word points, not what is on disk there.
+fn anchored_at_install_root(executable: &str, context: super::PathContext<'_>) -> bool {
+    let spelled = executable.replace('\\', "/");
+    let Some(cwd) = context.cwd.filter(|cwd| Path::new(cwd).is_absolute()) else {
+        return false;
+    };
+    let tilde_rest = spelled.strip_prefix("~/").map(str::to_owned);
+    let spelled = match tilde_rest {
+        Some(rest) => match context.home_dir {
+            Some(home) if Path::new(home).is_absolute() => {
+                format!("{}/{rest}", home.replace('\\', "/").trim_end_matches('/'))
+            }
+            _ => return false,
+        },
+        None => spelled,
+    };
+    let absolute = spelled.starts_with('/')
+        || matches!(spelled.as_bytes(), [drive, b':', b'/', ..] if drive.is_ascii_alphabetic());
+    // Everything below compares the spelling itself, so a component that names
+    // no directory would let the same file be written two ways: `/root/./dir`
+    // and `/root//dir` both reach `/root/dir` while defeating the prefix the
+    // workspace is refused by.
+    let mut components = spelled.split('/');
+    components.next();
+    if !absolute || !components.all(names_its_own_directory) {
+        return false;
+    }
+    let lowered = spelled.to_ascii_lowercase();
+    let workspace = cwd
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    if lowered.starts_with(&format!("{workspace}/")) {
+        return false;
+    }
+    let home = context.home_dir.map(|home| {
+        home.replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    });
+    // A drive letter is dropped so the Windows roots are written once.
+    let rooted = match lowered.as_bytes() {
+        [drive, b':', b'/', ..] if drive.is_ascii_alphabetic() => &lowered[2..],
+        _ => lowered.as_str(),
+    };
+    INSTALL_ROOTS.iter().any(|root| {
+        let below = match root.strip_prefix('~') {
+            Some(rest) => home
+                .as_deref()
+                .and_then(|home| lowered.strip_prefix(format!("{home}{rest}").as_str())),
+            None => rooted.strip_prefix(*root),
+        };
+        below.is_some_and(|rest| {
+            !APPLICATION_ROOTS.contains(root)
+                || rest.split('/').next().is_some_and(names_guard_install)
+        })
+    })
+}
+
+/// Whether one component of a spelled path names a directory of its own.
+///
+/// `.`, `..` and the empty component a doubled separator leaves name none, so
+/// the same file could be reached by a spelling that misses the workspace
+/// prefix below. Windows drops a trailing dot or space from each component
+/// before it opens one, so `proj.\bin` opens `proj\bin`: that spelling misses
+/// the prefix while the file it reaches is inside the workspace. A component
+/// carrying `~` is a short name (`PROGRA~1`), which the same comparison cannot
+/// read either. An install is spelled by none of them.
+fn names_its_own_directory(component: &str) -> bool {
+    !matches!(component, "" | "." | "..")
+        && !component.ends_with(['.', ' '])
+        && !component.contains('~')
+}
+
+/// Install roots that hold one directory per application rather than one
+/// shared tree. Guard's own is named after it, so a sibling that is not is
+/// another program's install or a checkout written beside them, and the `bin`
+/// it carries proves nothing about who wrote the file inside.
+///
+/// A root is read as deeply as it is spelled, and a spelling is admitted by
+/// whichever entry reads it, so a narrower root answers for the layouts the
+/// wider one would refuse. `/Library/Application Support/` holds one directory
+/// per application as `/Library/` does, and is listed here as well, so Guard's
+/// own install below it is admitted while a sibling is not. A packager's tree
+/// there is a shared root instead and is listed above without a Guard-named
+/// directory: `/opt/homebrew/` carries one directory per formula below a
+/// `/opt/` an account cannot add to, and `%APPDATA%\Python` and `%APPDATA%\uv`
+/// carry one per interpreter version or tool below a `Roaming` a session
+/// writes freely.
+const APPLICATION_ROOTS: &[&str] = &[
+    "~/applications/",
+    "~/appdata/local/programs/",
+    "~/appdata/roaming/",
+    "~/library/application support/",
+    "/applications/",
+    "/library/",
+    "/library/application support/",
+    "/opt/",
+    "/program files (x86)/",
+    "/program files/",
+    "/programdata/",
+];
+
+/// Whether a directory directly below an application root is Guard's own. The
+/// installers write `HOL Guard`, the macOS bundle of the same name, or the
+/// package name; a version or edition written after it is still Guard's.
+fn names_guard_install(component: &str) -> bool {
+    ["hol guard", "hol-guard", "hol_guard", "plugin-guard"]
+        .iter()
+        .any(|name| component.starts_with(name))
 }
 
 pub(super) fn safe_hol_guard_arguments(arguments: &[String]) -> bool {
@@ -139,7 +408,45 @@ pub(super) fn safe_hol_guard_arguments(arguments: &[String]) -> bool {
         || command_inspection(&words)
         || approval_inspection(&words)
         || record_inspection(&words)
+        || artifact_explanation(&words)
         || posture_inspection(&words)
+}
+
+/// `hol-guard explain <target>` prints the evidence Guard already holds for
+/// one inventory artifact, or scans one local path and reports what the scan
+/// found about it: scores, detected ecosystems, package names, finding titles
+/// and severity counts. The payload never carries the target's own bytes, and
+/// nothing in the local store is written.
+///
+/// `--cisco-mode` only chooses whether that scan may add Cisco's offline
+/// evidence, so it is admitted beside the target. `--json` is lifted out
+/// before the path is compared, as it is for the other readers here, so
+/// neither flag has to be written last. Every root override (`--home`,
+/// `--guard-home`, `--workspace`) stays under review: this proof covers the
+/// evidence Guard holds for this home, not for one a flag names.
+fn artifact_explanation(words: &[&str]) -> bool {
+    let json_flags = words.iter().filter(|word| **word == "--json").count();
+    let rest: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|word| *word != "--json")
+        .collect();
+    json_flags <= 1
+        && match rest.as_slice() {
+            ["explain", target] => explained_target(target),
+            ["explain", target, "--cisco-mode", mode]
+            | ["explain", "--cisco-mode", mode, target] => {
+                explained_target(target) && matches!(*mode, "auto" | "on" | "off")
+            }
+            _ => false,
+        }
+}
+
+/// The single artifact `explain` reads: an inventory id or a local path. A
+/// leading dash is refused so the target can never be read as an option the
+/// shapes above did not admit.
+fn explained_target(target: &str) -> bool {
+    !target.starts_with('-') && inspected_text(target)
 }
 
 /// `repair --dry-run`, the recovery path's own preview: every repair step
@@ -168,22 +475,39 @@ fn posture_inspection(words: &[&str]) -> bool {
 /// `unlock` and `clear-history`, and every root override (`--home`,
 /// `--guard-home`, `--workspace`), are not admitted. `open` launches the
 /// user's own approval center rather than printing anything, so it stays on
-/// the review path with the other launches.
+/// the review path with the other launches. `--json` is lifted out before the
+/// path is read, so neither it nor `--timeout` has to be written last.
 fn approval_inspection(words: &[&str]) -> bool {
-    match words {
-        ["approvals"]
-        | ["approvals", "--json"]
-        | ["approvals", "list"]
-        | ["approvals", "list", "--json"] => true,
-        ["approvals", "retry-hint" | "wait", id]
-        | ["approvals", "retry-hint" | "wait", id, "--json"] => request_id(id),
-        ["approvals", "wait", id, "--timeout", seconds]
-        | ["approvals", "wait", id, "--timeout", seconds, "--json"] => {
-            request_id(id) && seconds.parse::<u16>().is_ok_and(|seconds| seconds <= 600)
+    let json_flags = words.iter().filter(|word| **word == "--json").count();
+    let rest: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|word| *word != "--json")
+        .collect();
+    json_flags <= 1
+        && match rest.as_slice() {
+            ["approvals"] | ["approvals", "list"] => true,
+            ["approvals", "retry-hint" | "wait", id] => request_id(id),
+            ["approvals", "wait", id, "--timeout", seconds]
+            | ["approvals", "wait", "--timeout", seconds, id] => {
+                request_id(id) && wait_timeout(seconds)
+            }
+            _ => false,
         }
-        _ => false,
-    }
 }
+
+/// The launcher's own `--timeout` bound: its parser refuses anything outside
+/// `0..=MAX_APPROVAL_WAIT_SECONDS` before the wait begins, so a larger number
+/// names no runnable command and is not admitted here either.
+fn wait_timeout(seconds: &str) -> bool {
+    seconds
+        .parse::<u16>()
+        .is_ok_and(|seconds| seconds <= MAX_APPROVAL_WAIT_SECONDS)
+}
+
+/// Mirrors `MAX_APPROVAL_WAIT_TIMEOUT_SECONDS` in
+/// `src/codex_plugin_scanner/guard/approval_wait_limits.py`.
+const MAX_APPROVAL_WAIT_SECONDS: u16 = 600;
 
 fn request_id(id: &str) -> bool {
     !id.starts_with('-')

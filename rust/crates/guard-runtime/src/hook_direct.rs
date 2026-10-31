@@ -35,7 +35,9 @@
 
 use crate::policy_store::policy_store_direct_lane::DirectLaneDefer;
 use crate::policy_store::PolicySnapshotStore;
-use edge::{direct_event, post_tool_answer, pre_tool_answer, prompt_answer, reviewed_edge};
+use edge::{
+    direct_event, post_tool_answer, pre_tool_answer, prompt_answer, reviewed_edge, shell_action,
+};
 use guard_contracts::{
     GuardExecutionEnvironmentV1, GuardHookEnvelopeV2, GuardHookSourceMetadataV2,
     GUARD_HOOK_ENVELOPE_V2_SCHEMA,
@@ -148,6 +150,12 @@ pub(crate) struct HookDirectRequestV1 {
     pub(crate) workspace: Option<String>,
     #[serde(default)]
     pub(crate) deadline_budget_ms: Option<u64>,
+    /// Set by a bridge that has already seen the daemon fail, asking the
+    /// resident to answer only what the emergency-safe profile allows. An
+    /// older bridge sends no such field and is read as `false`, which keeps
+    /// the ordinary lane.
+    #[serde(default)]
+    pub(crate) emergency_safe_only: bool,
     pub(crate) payload: Value,
 }
 
@@ -161,6 +169,7 @@ pub(crate) enum HookDirectDefer {
     WorkspaceMissing,
     WorkspaceInvalid,
     Lane(DirectLaneDefer),
+    Cursor(cursor::CursorDefer),
     BindingIncomplete,
     HomeMismatch,
     LocalCliRules,
@@ -179,6 +188,10 @@ pub(crate) enum HookDirectDefer {
     /// not carry, or does not carry readably: only the daemon can resolve
     /// what its structured output requires.
     StructuredMediation,
+    /// A hook the bridge asked about under the emergency-safe profile that
+    /// the profile does not continue, so the bridge pauses it as it would
+    /// have without asking.
+    EmergencySafeProfile,
 }
 
 impl HookDirectDefer {
@@ -192,6 +205,7 @@ impl HookDirectDefer {
             Self::WorkspaceMissing => "direct_hook_workspace_missing",
             Self::WorkspaceInvalid => "direct_hook_workspace_invalid",
             Self::Lane(defer) => defer.code(),
+            Self::Cursor(defer) => defer.code(),
             Self::BindingIncomplete => "direct_hook_binding_incomplete",
             Self::HomeMismatch => "direct_hook_home_mismatch",
             Self::LocalCliRules => "direct_hook_local_cli_rules",
@@ -207,6 +221,7 @@ impl HookDirectDefer {
             Self::ReviewQueue => "direct_hook_review_queue",
             Self::RuntimeSuperseded => "direct_hook_runtime_superseded",
             Self::StructuredMediation => "direct_hook_structured_mediation",
+            Self::EmergencySafeProfile => "direct_hook_emergency_safe_profile",
         }
     }
 }
@@ -329,6 +344,21 @@ fn answer(
     let candidate = workspace_candidate(&payload, request.workspace.as_deref(), &request_home)?
         .ok_or(HookDirectDefer::WorkspaceMissing)?;
     let workspace = settled_directory(&candidate)?;
+    // A bridge that has seen the daemon fail asks only about the ratified
+    // emergency-safe profile; nothing else is answered on that pass. The
+    // home and workspace are settled first so a call the profile continues
+    // is recorded the way every direct answer is.
+    if request.emergency_safe_only {
+        return emergency_safe::answer(
+            &request.harness,
+            &request.guard_home,
+            &request_home,
+            &workspace,
+            pre_tool,
+            &evidence_payload,
+            policy_store,
+        );
+    }
     let (snapshot, binding) = policy_store
         .admit_direct_hook_or_subdirectory(&workspace)
         .map_err(HookDirectDefer::Lane)?;
@@ -358,9 +388,15 @@ fn answer(
     // A change saved since then lives only in the store, so read it there
     // too. An unreadable store counts as holding rules, as a failed daemon
     // probe does.
-    let store =
-        crate::local_store_read::hook_store_probe(Path::new(&request.guard_home), &request.harness)
-            .map_err(|_| HookDirectDefer::LocalCliRules)?;
+    let command = pre_tool
+        .then(|| crate::local_store_read::pre_tool_command(&payload))
+        .flatten();
+    let store = crate::local_store_read::hook_store_probe(
+        Path::new(&request.guard_home),
+        &request.harness,
+        command,
+    )
+    .map_err(|_| HookDirectDefer::LocalCliRules)?;
     if store.harness_unmanaged {
         // The daemon passes such a hook through and leaves the harness its
         // own permission flow; a direct answer would replace that flow.
@@ -380,6 +416,10 @@ fn answer(
         Some(posture) => posture == "watch",
         None => snapshot.mode == "observe",
     };
+    // A saved or Guard Cloud block on this exact command is the daemon's to
+    // apply, ahead of the edge's allow and any saved allow; Watch only
+    // records it.
+    let exact_command_block = store.exact_command_block && !recording_only;
     if binding.evidence_drain != Some(true) {
         return Err(HookDirectDefer::EvidenceUndrained);
     }
@@ -393,7 +433,8 @@ fn answer(
                 &request_home,
                 &request.guard_home,
                 binding.contained_sink_command.as_deref(),
-            )?;
+            )?
+            .with_native_sink();
             if route == cursor::Route::Sink {
                 return cursor::admit_sink(&payload, &scope);
             }
@@ -448,6 +489,11 @@ fn answer(
         containment_sink: None,
     };
     let (edge, fence_wait) = fence::evaluate(envelope, policy_store)?;
+    // Only a shell action runs the blocked command; another tool that carries
+    // the same text keeps the direct answer, as the daemon would give it.
+    if exact_command_block && shell_action(&edge) {
+        return Err(HookDirectDefer::SavedDecision);
+    }
     if let Some(scope) = cursor_probe {
         return Ok(cursor::probe_answer(&edge, &evidence_payload, &scope));
     }
@@ -632,10 +678,12 @@ pub(crate) mod contained;
 pub(crate) mod cursor;
 #[path = "hook_direct_edge.rs"]
 mod edge;
+#[path = "hook_direct_emergency_safe.rs"]
+mod emergency_safe;
 #[path = "hook_direct_fence.rs"]
 mod fence;
 #[path = "hook_direct_lifecycle.rs"]
-mod lifecycle;
+pub(crate) mod lifecycle;
 #[path = "hook_direct_local_cli.rs"]
 pub(crate) mod local_cli;
 #[path = "hook_direct_pi.rs"]

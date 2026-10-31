@@ -4,8 +4,9 @@ import json
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from hashlib import sha256
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pytest
 from tests.daemon_control_patching import patch_daemon_global
 from tests.guard_test_invariants import TEST_INVARIANTS, invariant_markers_for_nodeid
 from tests.home_isolation import isolate_user_home
+from tests.outbound_network_guard import outbound_network_attempts
 
 # Before any Guard module computes a default home or a test spawns a helper.
 isolate_user_home()
@@ -57,6 +59,26 @@ if pythonpath_prefix:
 # and so an inherited value cannot silently re-enable launches.
 os.environ["HOL_GUARD_TEST_DISABLE_BROWSER_OPEN"] = "1"
 os.environ.pop("HOL_GUARD_TEST_ALLOW_BROWSER_OPEN", None)
+
+# Fixtures carry production Guard Cloud URLs and tokens that are not valid
+# there, so no test may reach a public host. Inside this process the socket
+# guard below refuses it; a fake that stands in for the transport never opens a
+# socket and is unaffected. The flag carries the rule to supply-chain egress in
+# helpers a test spawns, and to archive fetches the native runtime makes, which
+# no Python socket guard can see. Tests that need Cloud answers serve them from loopback.
+os.environ["HOL_GUARD_TEST_LOOPBACK_EGRESS_ONLY"] = "1"
+
+_session_network_guard = ExitStack()
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    # Session-wide rather than per test: background threads a test leaves
+    # running are still covered after its own fixtures are torn down.
+    _session_network_guard.enter_context(outbound_network_attempts())
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    _session_network_guard.close()
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -179,15 +201,18 @@ def _fetch_pi_hook_bridge(request: pytest.FixtureRequest, monkeypatch: pytest.Mo
 
 
 @pytest.fixture(autouse=True)
-def _python_mcp_proxy_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
+def _python_mcp_proxy_launcher(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Install MCP proxies with the Python launcher argv unless a test opts in.
 
-    Most install and refresh tests pin the Python proxy entry. Relay tests
-    select the native relay by setting or clearing ``HOL_GUARD_MCP_RELAY``.
+    Most install and refresh tests pin the Python proxy entry. Tests marked
+    ``native_mcp_relay`` keep the native relay selection.
     """
 
-    # Subprocess installers copy os.environ, so the pin is an environment value.
-    monkeypatch.setenv("HOL_GUARD_MCP_RELAY", "python")
+    if request.node.get_closest_marker("native_mcp_relay") is not None:
+        return
+    from codex_plugin_scanner.guard.adapters import mcp_relay_native
+
+    monkeypatch.setattr(mcp_relay_native, "native_mcp_relay", lambda guard_home=None: None)
 
 
 @pytest.fixture(autouse=True)
@@ -336,6 +361,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         raise pytest.UsageError(f"Protected test invariants are missing from collection: {details}")
 
 
+_DAEMON_HOME_MARKERS = frozenset({"daemon-state.json", "daemon-wake-reservation.json"})
+
+
 def _test_guard_homes_with_daemon_state(root: Path) -> set[Path]:
     guard_homes: set[Path] = set()
     pending = [root]
@@ -347,7 +375,7 @@ def _test_guard_homes_with_daemon_state(root: Path) -> set[Path]:
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             pending.append(Path(entry.path))
-                        elif entry.is_file(follow_symlinks=False) and entry.name == "daemon-state.json":
+                        elif entry.is_file(follow_symlinks=False) and entry.name in _DAEMON_HOME_MARKERS:
                             guard_homes.add(Path(entry.path).parent)
                     except OSError:
                         continue
@@ -365,29 +393,90 @@ def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> 
     if not isinstance(test_tmp_path, Path):
         return
 
-    from codex_plugin_scanner.guard.daemon.manager import retire_all_guard_daemons_for_home
+    from codex_plugin_scanner.guard.daemon.manager import (
+        guard_daemon_retirement_is_complete,
+        retire_all_guard_daemons_for_home,
+    )
     from codex_plugin_scanner.guard.native_daemon_lifecycle import NativeDaemonLifecycleError
 
     # The per-test native mode is already undone here; the lifecycle decisions
     # that identify the daemons to retire need the same compiled authority.
     guard_homes = sorted(_test_guard_homes_with_daemon_state(test_tmp_path))
+    deadline = time.monotonic() + _DAEMON_WAKE_SETTLE_SECONDS
+    woken_homes = _wait_for_detached_daemon_wakes(guard_homes, deadline)
+    retirement = _DaemonRetirement(
+        retire_all_guard_daemons_for_home,
+        guard_daemon_retirement_is_complete,
+        NativeDaemonLifecycleError,
+        woken_homes,
+        deadline,
+    )
     if guard_homes and "HOL_GUARD_NATIVE" not in os.environ and os.environ.get("HOL_GUARD_NATIVE_REGRESSION") == "1":
         os.environ["HOL_GUARD_NATIVE"] = "force"
         os.environ["HOL_GUARD_TEST_MODE"] = "1"
         try:
-            _retire_homes(guard_homes, retire_all_guard_daemons_for_home, NativeDaemonLifecycleError)
+            retirement.run(guard_homes)
         finally:
             os.environ.pop("HOL_GUARD_NATIVE", None)
             os.environ.pop("HOL_GUARD_TEST_MODE", None)
         return
-    _retire_homes(guard_homes, retire_all_guard_daemons_for_home, NativeDaemonLifecycleError)
+    retirement.run(guard_homes)
 
 
-def _retire_homes(guard_homes: list[Path], retire: Callable[[Path], object], unavailable: type[Exception]) -> None:
-    for guard_home in guard_homes:
+# A hook that finds no live daemon reserves a detached `guard daemon ensure`
+# and returns at once. That launch can finish after the test does, so
+# retirement waits for the reservation to clear and then retries until no
+# daemon, pending launch or process remains for that home.
+_DAEMON_WAKE_SETTLE_SECONDS = 15.0
+
+
+def _wait_for_detached_daemon_wakes(guard_homes: list[Path], deadline: float) -> frozenset[Path]:
+    woken = frozenset(guard_home for guard_home in guard_homes if _daemon_wake_reserved(guard_home))
+    waking = list(woken)
+    while waking and time.monotonic() < deadline:
+        time.sleep(0.1)
+        waking = [guard_home for guard_home in waking if _daemon_wake_reserved(guard_home)]
+    return woken
+
+
+def _daemon_wake_reserved(guard_home: Path) -> bool:
+    try:
+        reservation = json.loads((guard_home / "daemon-wake-reservation.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(reservation, dict) and bool(reservation.get("token"))
+
+
+class _DaemonRetirement:
+    def __init__(
+        self,
+        retire: Callable[[Path], object],
+        is_complete: Callable[[Path], bool],
+        unavailable: type[Exception],
+        woken_homes: frozenset[Path],
+        deadline: float,
+    ) -> None:
+        self._retire = retire
+        self._is_complete = is_complete
+        self._unavailable = unavailable
+        self._woken_homes = woken_homes
+        self._deadline = deadline
+
+    def run(self, guard_homes: list[Path]) -> None:
+        for guard_home in guard_homes:
+            self._retire_home(guard_home)
+
+    def _retire_home(self, guard_home: Path) -> None:
         # Best-effort cleanup: an unavailable native authority must not mask the test result.
-        with suppress(unavailable):
-            retire(guard_home)
+        with suppress(self._unavailable):
+            self._retire(guard_home)
+            # Only a home a detached wake touched is retried: fixture state
+            # files with made-up pids never read as retired.
+            while guard_home in self._woken_homes and not self._is_complete(guard_home):
+                if time.monotonic() >= self._deadline:
+                    return
+                time.sleep(0.2)
+                self._retire(guard_home)
 
 
 @pytest.fixture(autouse=True)

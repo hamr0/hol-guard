@@ -17,17 +17,25 @@
 //! the sink, and with a plain allow otherwise, and it admits the sink command
 //! that probe wrote when `beforeShellExecution` runs it. Neither is recorded:
 //! `beforeShellExecution` stays the one check the user sees, and the sink
-//! re-authorizes the saved call before it runs anything. On Windows, and for
-//! any other shell call naming the probe or the sink, the daemon reviews the
-//! call as usual.
+//! re-authorizes the saved call before it runs anything. A workspace sandbox
+//! the runtime's own sink reproduces runs there instead, on the direct lane
+//! and on the daemon path when the daemon admits that sink too; its command
+//! is admitted only when it names this runtime's executable. On Windows, and
+//! for any other shell call naming the probe or the sink, the daemon reviews
+//! the call as usual.
 
 use super::{reviewed_edge, HookDirectDefer, CURSOR, PRE_TOOL_USE};
-use crate::hook_decision_containment_rewrite::containment_rewrite;
+use crate::hook_decision_containment_rewrite::{containment_rewrite_with, Native};
 use crate::hook_decision_containment_route::{edge_route, host_platform};
+use admission::admitted;
 use guard_command::hook_responses::pre_tool;
 use guard_contracts::{ContainmentRewriteInputsV1, GuardHookSourceMetadataV2};
 use serde_json::{json, Map, Value};
 use std::path::Path;
+
+/// The runtime's own sink verb (`contained_workspace_sink::SINK_COMMAND`),
+/// spelled here because that module is built only on Unix.
+const NATIVE_SINK_VERB: &str = "contained-workspace-sink";
 
 const SHELL_TOOL: &str = "Shell";
 const SOURCE_HOOK_FIELD: &str = "cursor_source_hook_event";
@@ -41,12 +49,6 @@ const ROUTED_REASON: &str = "native_contained_execution_routed";
 /// renders the verdict in ZCode's shape; the hook copies only the rewritten
 /// input back to Cursor.
 const RECEIPT_FORMAT: &str = "zcode";
-const SINK_FLAGS: [&str; 4] = [
-    "--workspace",
-    "--request-file",
-    "--request-sha256",
-    "--home",
-];
 
 /// How the resident takes a Cursor `PreToolUse`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,12 +61,53 @@ pub(super) enum Route {
     Sink,
 }
 
+/// Why the resident hands a Cursor route probe or sink command to the
+/// daemon. Each reason counts under its own code, so the diagnostics show
+/// which check a deferred probe or sink failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CursorDefer {
+    /// Windows, where the daemon reviews every probe and sink.
+    Platform,
+    /// A call that carries `guard_containment_receipt_only`.
+    ReceiptOnly,
+    /// A `Shell` call Guard's hook did not name as its route probe.
+    ProbeUnnamed,
+    /// A command naming the sink outside `beforeShellExecution`.
+    SinkSource,
+    /// A sink command that is not the argv a probe writes for this Guard
+    /// home, or whose digest is not one.
+    SinkArgv,
+    /// A sink command naming another home than the hook's.
+    SinkHome,
+    /// A sink command naming another workspace than the hook's.
+    SinkWorkspace,
+    /// A sink command whose request is not a snapshot under the temporary
+    /// directory.
+    SinkSnapshot,
+}
+
+impl CursorDefer {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Platform => "direct_hook_cursor_platform",
+            Self::ReceiptOnly => "direct_hook_cursor_receipt_only",
+            Self::ProbeUnnamed => "direct_hook_cursor_probe_unnamed",
+            Self::SinkSource => "direct_hook_cursor_sink_source",
+            Self::SinkArgv => "direct_hook_cursor_sink_argv",
+            Self::SinkHome => "direct_hook_cursor_sink_home",
+            Self::SinkWorkspace => "direct_hook_cursor_sink_workspace",
+            Self::SinkSnapshot => "direct_hook_cursor_sink_snapshot",
+        }
+    }
+}
+
 /// Where the probe's sink command runs, as the binding names it.
 pub(super) struct Scope {
     workspace: String,
     home_dir: String,
     guard_home: String,
     sink_command: Vec<String>,
+    native: bool,
 }
 
 impl Scope {
@@ -81,7 +124,15 @@ impl Scope {
             sink_command: sink_command
                 .ok_or(HookDirectDefer::BindingIncomplete)?
                 .to_vec(),
+            native: false,
         })
+    }
+
+    /// The scope a probe may route to the runtime's own sink, when the
+    /// caller admits that sink's command on `beforeShellExecution` too.
+    pub(super) fn with_native_sink(mut self) -> Self {
+        self.native = true;
+        self
     }
 }
 
@@ -92,23 +143,29 @@ impl Scope {
 pub(super) fn route(payload: &Map<String, Value>) -> Result<Route, HookDirectDefer> {
     let text = |name: &str| payload.get(name).and_then(Value::as_str);
     let probe = text("tool_name") == Some(SHELL_TOOL) && !payload.contains_key(SOURCE_HOOK_FIELD);
-    let sink = command(payload).is_some_and(|command| command.contains(SINK_VERB));
+    let sink = command(payload)
+        .is_some_and(|command| command.contains(SINK_VERB) || command.contains(NATIVE_SINK_VERB));
     if !probe && !sink {
         return Ok(Route::Review);
     }
     let receipt_only = payload
         .get(RECEIPT_ONLY_FIELD)
         .is_some_and(|value| !value.is_null());
-    let route = if cfg!(windows) || receipt_only {
-        None
+    let route = if cfg!(windows) {
+        Err(CursorDefer::Platform)
+    } else if receipt_only {
+        Err(CursorDefer::ReceiptOnly)
     } else if probe {
         (text("hook_event_name") == Some(PRE_TOOL_USE)
             && payload.get(PROBE_FIELD) == Some(&Value::Bool(true)))
         .then_some(Route::Probe)
+        .ok_or(CursorDefer::ProbeUnnamed)
     } else {
-        (text(SOURCE_HOOK_FIELD) == Some(BEFORE_SHELL)).then_some(Route::Sink)
+        (text(SOURCE_HOOK_FIELD) == Some(BEFORE_SHELL))
+            .then_some(Route::Sink)
+            .ok_or(CursorDefer::SinkSource)
     };
-    route.ok_or(HookDirectDefer::PayloadUnsupported)
+    route.map_err(HookDirectDefer::Cursor)
 }
 
 /// The probe's plain allow when the sink cannot take the call, before the
@@ -160,12 +217,15 @@ fn reviewed_probe(edge: &Value, payload: &Map<String, Value>, scope: &Scope) -> 
 /// The edge's own answer to Cursor's route probe, when the daemon sent the
 /// argv that starts Guard's CLI: the response `daemon_answer` gives for the
 /// edge just produced, so the daemon makes one resident call instead of two.
-/// `None` for any call that is not the probe.
+/// With `native_sink` the daemon admits the runtime's own sink as well, so
+/// a call that sink reproduces routes there. `None` for any call that is not
+/// the probe.
 pub(crate) fn edge_probe_answer(
     payload: &Map<String, Value>,
     edge: &Value,
     source: &GuardHookSourceMetadataV2,
     sink_command: &[String],
+    native_sink: bool,
     recording_only: bool,
 ) -> Option<Value> {
     if !matches!(route(payload), Ok(Route::Probe)) {
@@ -178,6 +238,11 @@ pub(crate) fn edge_probe_answer(
         Some(sink_command),
     )
     .ok()?;
+    let scope = if native_sink {
+        scope.with_native_sink()
+    } else {
+        scope
+    };
     let answer = unreviewed_probe(payload, &scope, recording_only)
         .unwrap_or_else(|| reviewed_probe(edge, payload, &scope));
     answer.get("harness_response").cloned()
@@ -193,9 +258,7 @@ pub(super) fn admit_sink(
     payload: &Map<String, Value>,
     scope: &Scope,
 ) -> Result<Value, HookDirectDefer> {
-    if !admitted(payload, scope) {
-        return Err(HookDirectDefer::PayloadUnsupported);
-    }
+    admitted(payload, scope).map_err(HookDirectDefer::Cursor)?;
     Ok(json!({
         "harness_response": { "policy_action": "allow", "reason_code": ROUTED_REASON },
     }))
@@ -231,6 +294,13 @@ pub(crate) fn daemon_answer(params: &Map<String, Value>) -> Result<Option<Value>
         Some(&sink_command),
     )
     .map_err(|_| INVALID)?;
+    // A daemon that admits the runtime's own sink says so; an older one
+    // reviews that command, so its probes keep Guard's sink.
+    let scope = if params.get("native_sink") == Some(&Value::Bool(true)) {
+        scope.with_native_sink()
+    } else {
+        scope
+    };
     let answer = match route(payload) {
         Ok(Route::Probe) => {
             let edge = params.get("edge").ok_or(INVALID)?;
@@ -304,10 +374,40 @@ fn routed(parsed: &Value, payload: &Map<String, Value>, scope: &Scope) -> Option
         home: scope.home_dir.clone(),
         sink_command: scope.sink_command.clone(),
     };
-    let response = containment_rewrite(&inputs).ok()?.response?;
+    let native = receipt
+        .get("reason")
+        .filter(|_| scope.native)
+        .map(|reason| Native {
+            reason,
+            sink: native_sink,
+        });
+    let response = containment_rewrite_with(&inputs, native).ok()?.response?;
     let text = |name: &str| response.get(name).and_then(Value::as_str);
     (text("policy_action") == Some("allow") && text("reason_code") == Some(ROUTED_REASON))
         .then_some(response)
+}
+
+/// The runtime's own sink for a Cursor call. Cursor may repeat the directory
+/// in the call; the probe only reaches the sink when that names the
+/// workspace, which the sink runs in anyway, so the repeat is set aside once
+/// it still resolves there. Any other spelling keeps Guard's sink.
+fn native_sink(
+    response: &Value,
+    original: &Map<String, Value>,
+    workspace: &str,
+    home: &str,
+) -> Option<String> {
+    let mut call = original.clone();
+    let root = std::fs::canonicalize(workspace).ok()?;
+    for key in ["cwd", "working_directory"] {
+        match call.remove(key) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(text)) if text.is_empty() => {}
+            Some(Value::String(text)) if std::fs::canonicalize(&text).ok()? == root => {}
+            Some(_) => return None,
+        }
+    }
+    super::contained::native_sink(response, &call, workspace, home)
 }
 
 /// Whether `value` names the workspace itself, after `~` expansion against
@@ -327,64 +427,6 @@ fn same_directory(value: &str, scope: &Scope) -> bool {
         std::fs::canonicalize(&scope.workspace),
     ) {
         (Ok(named), Ok(workspace)) => named == workspace,
-        _ => false,
-    }
-}
-
-fn admitted(payload: &Map<String, Value>, scope: &Scope) -> bool {
-    let Some(argv) =
-        command(payload).and_then(|text| crate::mcp_proxy_shlex::split_with(text, "", ""))
-    else {
-        return false;
-    };
-    let head: Vec<&str> = scope
-        .sink_command
-        .iter()
-        .map(String::as_str)
-        .chain(["guard", SINK_VERB, "--harness", CURSOR, "--guard-home"])
-        .chain([scope.guard_home.as_str()])
-        .collect();
-    if argv.len() != head.len() + 2 * SINK_FLAGS.len()
-        || argv
-            .iter()
-            .zip(&head)
-            .any(|(argument, expected)| argument != expected)
-    {
-        return false;
-    }
-    let tail = &argv[head.len()..];
-    if tail
-        .iter()
-        .step_by(2)
-        .zip(SINK_FLAGS)
-        .any(|(flag, expected)| flag != expected)
-    {
-        return false;
-    }
-    let [workspace, request, digest, home] = [&tail[1], &tail[3], &tail[5], &tail[7]];
-    digest.len() == 64
-        && digest
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        && *home == scope.home_dir
-        && same_directory(workspace, scope)
-        && snapshot_under_temp(Path::new(request))
-}
-
-/// Whether `request` is a snapshot the rewrite writes: a file in its own
-/// directory under the temporary directory.
-fn snapshot_under_temp(request: &Path) -> bool {
-    if !request.is_absolute() {
-        return false;
-    }
-    let Some(root) = request.parent().and_then(Path::parent) else {
-        return false;
-    };
-    match (
-        std::fs::canonicalize(root),
-        std::fs::canonicalize(std::env::temp_dir()),
-    ) {
-        (Ok(root), Ok(temp)) => root == temp,
         _ => false,
     }
 }
@@ -428,6 +470,9 @@ pub(super) fn answer(edge: &[u8], recording_only: bool) -> Result<Value, HookDir
     }
     Ok(parsed)
 }
+
+#[path = "hook_direct_cursor_admission.rs"]
+mod admission;
 
 #[cfg(all(test, unix))]
 #[path = "hook_direct_cursor_route_tests.rs"]

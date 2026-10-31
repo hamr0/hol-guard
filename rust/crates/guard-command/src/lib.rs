@@ -49,6 +49,8 @@ mod cloud_scrub_source_search;
 mod codex_output_args;
 mod codex_output_env;
 pub mod command_action_risk_classes;
+#[cfg(test)]
+mod command_action_risk_classes_tests;
 mod command_ascii_comparison;
 mod command_candidate_common;
 mod command_common_cli_matchers;
@@ -88,6 +90,7 @@ pub mod command_native_factors;
 mod command_operand_matchers;
 pub mod command_option_parsing;
 mod command_parse_surface;
+mod command_reviewed_literal;
 mod command_segment_parsing;
 pub mod command_shadow;
 #[cfg(test)]
@@ -176,6 +179,7 @@ mod native_command_extension_evidence_tests;
 pub mod native_command_program;
 pub mod network_protection_bundle;
 pub mod network_url;
+pub mod node_build_output;
 pub mod npm_source_spec;
 pub mod ordered_json;
 #[cfg(unix)]
@@ -202,6 +206,8 @@ pub mod protection_health;
 #[cfg(test)]
 mod protection_health_tests;
 pub mod pytest_argv;
+#[cfg(test)]
+mod pytest_argv_tests;
 mod read_only_fanout;
 pub mod reviewed_invocation_bindings;
 pub mod rich_command_model_api;
@@ -455,11 +461,22 @@ mod workspace_roots;
 pub mod aibom_reporting;
 pub mod aibom_trust_metadata;
 pub mod archive_inspection;
-pub mod command_operation_classification;
 pub mod composition_rules;
 pub mod contained_argv;
 #[cfg(unix)]
 pub mod contained_execution;
+mod contained_git;
+
+/// Whether `argv` is a protected Git read the contained planner admits, for
+/// the `contained_path` fuzz target, which no operation reaches it through.
+#[doc(hidden)]
+pub fn git_read_only_invocation(argv: &[String]) -> bool {
+    contained_git::read_only_invocation(argv).is_some()
+}
+mod contained_node_tool;
+mod contained_package_test;
+mod contained_prefix;
+mod contained_run_prefix;
 #[cfg(unix)]
 pub mod contained_runner;
 pub mod credential_patterns;
@@ -567,3 +584,6 @@ mod verified_read_decision_tests;
 pub mod verified_read_plan;
 #[cfg(test)]
 mod verified_read_plan_tests;
+pub mod vite_output;
+#[cfg(test)]
+mod vite_output_tests;
