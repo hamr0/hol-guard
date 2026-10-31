@@ -253,6 +253,29 @@ pub(crate) fn command_shape(
         // scripts write it, not a transfer. Only that shape leaves the
         // exclusion; `reaches_outside` still holds its operands to the
         // workspace.
+        let moves = matches!(name, "cd" | "pushd");
+        // A move the walk joined is bounded by the walk, not by the parent
+        // steps the shallowest shell could spend. The reach check reads the
+        // operand as a path, and after a `;` the shallowest shell is the one
+        // whose descent failed — the shell the move climbs out of and that
+        // runs nothing afterwards. Hand the operand to the reach check as
+        // already accounted for, so everything else about the segment, a
+        // redirect target above all, is still read from that shell.
+        //
+        // Only the bare spelling earns that, because only the bare spelling is
+        // what the walk followed: `./cd` is a program in the workspace that
+        // happens to carry the builtin's name, and the walk never moved for it.
+        // And Git's metadata stays refused wherever it stands, since the reach
+        // check denies it to every program but `git` and an accounted operand
+        // would carry it straight past that refusal.
+        let walked_move = matches!(executable, "cd" | "pushd")
+            && walked_inside
+            && matches!(segment.arguments.as_slice(),
+                [target] if cd::walked(target) && !names_git_metadata(target));
+        let accounted = script
+            .as_ref()
+            .map(|(operand, _)| operand.as_str())
+            .or_else(|| walked_move.then(|| segment.arguments[0].as_str()));
         if (NETWORK_CLIENTS.contains(&name)
             && !(name == "rsync" && super::rsync_local::local_copy_segment(segment)))
             || reach::reaches_outside(
@@ -261,10 +284,10 @@ pub(crate) fn command_shape(
                 workspace,
                 temp_fixed,
                 home_fixed,
-                script.as_ref().map(|(operand, _)| operand.as_str()),
+                accounted,
                 below.get(index).copied().unwrap_or(0),
             )
-            || (matches!(name, "cd" | "pushd")
+            || (moves
                 && !matches!(segment.arguments.as_slice(),
                     [target] if cd::bounded(target, workspace, temp_fixed)
                         || (walked_inside && cd::walked(target))))
@@ -369,6 +392,15 @@ pub(crate) fn split_at_init(
             .or_else(|| tail.strip_prefix('\n'))?
     };
     Some((prefix, rest.trim().to_owned()))
+}
+
+/// Whether `target` names Git's metadata directory, which belongs to `git`
+/// alone wherever it stands. The reach check refuses it to every other
+/// program, so a move that names it is never already accounted for.
+fn names_git_metadata(target: &str) -> bool {
+    Path::new(target)
+        .components()
+        .any(|component| component.as_os_str() == ".git")
 }
 
 fn extensions_contain(
