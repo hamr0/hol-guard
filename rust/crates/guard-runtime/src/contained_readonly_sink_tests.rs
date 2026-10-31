@@ -34,7 +34,10 @@ fn plan(profile: &str) -> ReadonlyPlan {
         command: words(&["node", "-e", "0"]),
         allowed_executables: words(&["/usr/bin/node"]),
         read_only_roots: Vec::new(),
+        output_roots: Vec::new(),
         denied_capabilities: Vec::new(),
+        user_site_root: None,
+        settings: Vec::new(),
     }
 }
 
@@ -81,14 +84,12 @@ fn a_plain_evaluation_is_the_program_and_its_clock() {
 }
 
 #[test]
-fn anything_but_the_plain_shape_stays_with_guards_own_sink() {
+fn a_setting_or_directory_change_is_not_the_plain_shape() {
     for command in [
         "CI=1 python3 -c 0",
         "cd x && python3 -c 0",
-        "pytest -q",
-        "python ../test_sample.py",
         "python3 -c 'unterminated",
-        "npx eslint .",
+        "CI=1 npx eslint .",
         "CI=1 vitest run",
     ] {
         assert_eq!(plain_program(command), None, "{command}");
@@ -103,7 +104,12 @@ fn the_edge_routes_only_a_plain_evaluation_without_a_cwd_argument() {
     let mut anchored = call("python3 -c 0");
     anchored.insert("cwd".into(), json!("/w/sub"));
     assert!(!plain_call(&denial, &anchored));
-    assert!(!plain_call(&denial, &call("CI=1 python3 -c 0")));
+    // Settings in front are carried; the run behind them must still be of
+    // the route's kind.
+    assert!(plain_call(&denial, &call("CI=1 python3 -c 0")));
+    assert!(plain_call(&denial, &call("REPORT_DIR=out python3 -c 0")));
+    assert!(!plain_call(&denial, &call("CI=1 vitest run")));
+    assert!(!plain_call(&denial, &call("CI=1 cd x && python3 -c 0")));
     assert!(!plain_call(&denial, &Map::new()));
     let workspace = Value::Object(response("native_workspace_containment_required", profile));
     assert!(!plain_call(&workspace, &call("python3 -c 0")));
@@ -154,6 +160,66 @@ fn a_plain_node_test_run_or_git_inspection_is_its_own_kind() {
     let git = Value::Object(response(ROUTES[5].0, ROUTES[5].1));
     assert!(plain_call(&git, &call("git log -1")));
     assert!(!plain_call(&git, &call("node --test")));
+}
+
+#[test]
+fn any_other_plain_program_is_planned_as_pytest() {
+    assert_eq!(
+        plain_program("pytest -q"),
+        Some((words(&["pytest", "-q"]), None, Kind::Pytest))
+    );
+    assert_eq!(
+        plain_program("timeout 30 pytest tests"),
+        Some((words(&["pytest", "tests"]), Some(30), Kind::Pytest))
+    );
+    assert_eq!(Kind::of(ROUTES[6]), Kind::Pytest);
+    let pytest = Value::Object(response(ROUTES[6].0, ROUTES[6].1));
+    assert!(plain_call(&pytest, &call("pytest -q")));
+    assert!(!plain_call(&pytest, &call("python3 -c 0")));
+    assert!(!plain_call(&pytest, &call("cd x && pytest -q")));
+    assert!(!plain_call(&pytest, &call("pytest -q > report.txt")));
+    assert!(!plain_call(&pytest, &call("CI=1 cd x && pytest -q")));
+    assert!(!plain_call(&pytest, &call("CI=1 pytest -q > report.txt")));
+}
+
+#[test]
+fn a_plain_lint_typecheck_or_build_run_is_a_node_tool() {
+    assert_eq!(
+        plain_program("npx eslint ."),
+        Some((words(&["npx", "eslint", "."]), None, Kind::NodeTool))
+    );
+    assert_eq!(Kind::of(ROUTES[7]), Kind::NodeTool);
+    let tool = Value::Object(response(ROUTES[7].0, ROUTES[7].1));
+    assert!(plain_call(&tool, &call("npx eslint .")));
+    assert!(!plain_call(&tool, &call("vitest run")));
+    // A build is the same tool, planned with the one directory it writes.
+    assert_eq!(
+        ROUTES[8],
+        (
+            "native_node_build_output_containment_required",
+            NODE_BUILD_PROFILE
+        )
+    );
+    assert_eq!(Kind::of(ROUTES[8]), Kind::NodeTool);
+    let build = Value::Object(response(ROUTES[8].0, ROUTES[8].1));
+    assert!(plain_call(&build, &call("npx vite build")));
+    assert!(plain_call(&build, &call("CI=1 npx vite build")));
+}
+
+#[test]
+fn a_package_test_is_routed_by_the_package_route() {
+    assert_eq!(
+        ROUTES[9],
+        (
+            "native_package_test_readonly_containment_required",
+            PACKAGE_PROFILE
+        )
+    );
+    assert_eq!(Kind::of(ROUTES[9]), Kind::Package);
+    let package = Value::Object(response(ROUTES[9].0, ROUTES[9].1));
+    assert!(plain_call(&package, &call("npm test")));
+    assert!(plain_call(&package, &call("CI=1 npm test")));
+    assert!(!plain_call(&package, &call("node --test")));
 }
 
 #[test]

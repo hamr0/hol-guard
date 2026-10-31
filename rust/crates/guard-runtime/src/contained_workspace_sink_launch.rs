@@ -29,8 +29,14 @@ pub(super) struct Launch<'a> {
 impl Launch<'_> {
     pub(super) fn contained(&self, argv: &[String]) -> Outcome<i32> {
         let private_root = path_text(&self.private.path)?;
-        let mut environment =
-            restricted_environment(self.workspace_text, self.workspace_text, &private_root, &[])?;
+        let mut environment = restricted_environment(
+            self.workspace_text,
+            self.workspace_text,
+            &private_root,
+            &[],
+            None,
+            &[],
+        )?;
         let empty_config = self.private.path.join("gitconfig");
         std::fs::write(&empty_config, b"").map_err(|_| {
             Failure::new(
@@ -175,17 +181,20 @@ impl Launch<'_> {
 }
 
 /// The environment the native filter leaves a contained run started from
-/// `cwd` in `workspace`, with its private home and temporary directory under
-/// `private_root`. `PYTHONPATH` and `VIRTUAL_ENV` are read as the host spells
-/// them, with `~` expanded, as Guard's own sink hands them over.
+/// `cwd` in `workspace`: a private home and temporary directory under
+/// `private_root`, any linked `user_site_root`, and `settings` exported over
+/// the process environment. `PYTHONPATH` and `VIRTUAL_ENV` keep the host's
+/// spelling, `~` expanded, as Guard's own sink hands them over.
 pub(super) fn restricted_environment(
     workspace: &str,
     cwd: &str,
     private_root: &str,
     allowed_executables: &[String],
+    user_site_root: Option<&str>,
+    settings: &[(String, String)],
 ) -> Outcome<BTreeMap<String, String>> {
     let mut source: Map<String, Value> = Map::new();
-    for (name, value) in environment() {
+    for (name, value) in environment().into_iter().chain(settings.iter().cloned()) {
         let value = match name.as_str() {
             "PYTHONPATH" => value
                 .split(':')
@@ -212,15 +221,13 @@ pub(super) fn restricted_environment(
             "private_home": format!("{private_root}/home"),
             "private_tmp": format!("{private_root}/tmp"),
             "allowed_executables": allowed_executables,
+            "user_site_root": user_site_root,
         }),
     )?;
     match launch_environment {
         Value::Object(entries) => entries
             .into_iter()
-            .map(|(name, value)| match value {
-                Value::String(value) => Some((name, value)),
-                _ => None,
-            })
+            .map(|(name, value)| Some((name, value.as_str()?.to_owned())))
             .collect::<Option<_>>(),
         _ => None,
     }
