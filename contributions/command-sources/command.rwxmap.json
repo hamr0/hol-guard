@@ -124,7 +124,12 @@
                   "-v",
                   "--version",
                   "--yes",
-                  "-y"
+                  "-y",
+                  "--no",
+                  "--no-install",
+                  "--bun",
+                  "--silent",
+                  "--verbose"
                 ],
                 "interspersed_options_with_values": [
                   "-o",

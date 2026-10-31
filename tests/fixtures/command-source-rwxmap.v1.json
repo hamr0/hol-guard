@@ -130,7 +130,12 @@
                         "-v",
                         "--version",
                         "--yes",
-                        "-y"
+                        "-y",
+                        "--no",
+                        "--no-install",
+                        "--bun",
+                        "--silent",
+                        "--verbose"
                       ],
                       "interspersed_options_with_values": [
                         "-o",
@@ -572,6 +577,84 @@
         0
       ],
       "id": "force-bunx",
+      "rule_id": "command.rwxmap.force"
+    },
+    {
+      "command": "npx --no-install rwxmap ./openapi.json --force",
+      "disabled_permissions": [],
+      "enabled_extensions": [
+        "command.rwxmap"
+      ],
+      "expected_action": "review",
+      "expected_effective_segments": [
+        0
+      ],
+      "id": "force-npx-no-install",
+      "rule_id": "command.rwxmap.force"
+    },
+    {
+      "command": "npx --no rwxmap ./openapi.json --force",
+      "disabled_permissions": [],
+      "enabled_extensions": [
+        "command.rwxmap"
+      ],
+      "expected_action": "review",
+      "expected_effective_segments": [
+        0
+      ],
+      "id": "force-npx-no",
+      "rule_id": "command.rwxmap.force"
+    },
+    {
+      "command": "bunx --bun rwxmap ./openapi.json --force",
+      "disabled_permissions": [],
+      "enabled_extensions": [
+        "command.rwxmap"
+      ],
+      "expected_action": "review",
+      "expected_effective_segments": [
+        0
+      ],
+      "id": "force-bunx-bun",
+      "rule_id": "command.rwxmap.force"
+    },
+    {
+      "command": "bunx --no-install rwxmap ./openapi.json --force",
+      "disabled_permissions": [],
+      "enabled_extensions": [
+        "command.rwxmap"
+      ],
+      "expected_action": "review",
+      "expected_effective_segments": [
+        0
+      ],
+      "id": "force-bunx-no-install",
+      "rule_id": "command.rwxmap.force"
+    },
+    {
+      "command": "bunx --silent rwxmap ./openapi.json --force",
+      "disabled_permissions": [],
+      "enabled_extensions": [
+        "command.rwxmap"
+      ],
+      "expected_action": "review",
+      "expected_effective_segments": [
+        0
+      ],
+      "id": "force-bunx-silent",
+      "rule_id": "command.rwxmap.force"
+    },
+    {
+      "command": "bunx --verbose rwxmap ./openapi.json --force",
+      "disabled_permissions": [],
+      "enabled_extensions": [
+        "command.rwxmap"
+      ],
+      "expected_action": "review",
+      "expected_effective_segments": [
+        0
+      ],
+      "id": "force-bunx-verbose",
       "rule_id": "command.rwxmap.force"
     },
     {
